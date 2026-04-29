@@ -19,6 +19,7 @@ import mindroom.timing as timing_module
 from mindroom.timing import (
     DispatchPipelineTiming,
     elapsed_ms_between,
+    elapsed_timing,
     emit_timing_event,
     milliseconds,
     timed,
@@ -258,6 +259,50 @@ def test_emit_timing_event_logs_when_enabled(monkeypatch: pytest.MonkeyPatch) ->
         ok=True,
         timing_scope="scope-123",
     )
+
+
+def test_elapsed_timing_logs_block_duration(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The block context manager should emit one elapsed timing log."""
+    monkeypatch.setenv("MINDROOM_TIMING", "1")
+    logger = _mock_timing_logger(monkeypatch)
+
+    with elapsed_timing("block_label", extra="value"):
+        pass
+
+    logger.debug.assert_called_once()
+    assert logger.debug.call_args.args == ("timing_elapsed",)
+    assert logger.debug.call_args.kwargs["label"] == "block_label"
+    assert logger.debug.call_args.kwargs["extra"] == "value"
+    assert logger.debug.call_args.kwargs["duration_ms"] >= 0
+
+
+def test_elapsed_timing_allows_block_metadata_updates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The block can update metadata before the elapsed timing log is emitted."""
+    monkeypatch.setenv("MINDROOM_TIMING", "1")
+    logger = _mock_timing_logger(monkeypatch)
+
+    with elapsed_timing("block_label", outcome="failed") as timing_data:
+        timing_data["outcome"] = "completed"
+
+    logger.debug.assert_called_once()
+    assert logger.debug.call_args.kwargs["label"] == "block_label"
+    assert logger.debug.call_args.kwargs["outcome"] == "completed"
+
+
+def test_elapsed_timing_logs_on_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The block context manager should still emit when the block raises."""
+    monkeypatch.setenv("MINDROOM_TIMING", "1")
+    logger = _mock_timing_logger(monkeypatch)
+
+    def fail() -> None:
+        with elapsed_timing("block_error_label"):
+            msg = "boom"
+            raise RuntimeError(msg)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        fail()
+
+    _assert_timing_logged(logger, "block_error_label")
 
 
 def test_timing_enabled_reflects_env(monkeypatch: pytest.MonkeyPatch) -> None:
