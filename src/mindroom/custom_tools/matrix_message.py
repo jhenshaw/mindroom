@@ -74,6 +74,7 @@ class MatrixMessageTools(Toolkit):
         action: str,
         room_id: str,
         attachment_count: int,
+        as_voice: bool,
     ) -> str | None:
         supports_attachments = self._action_supports_attachments(action)
         if action not in self._VALID_ACTIONS:
@@ -89,6 +90,12 @@ class MatrixMessageTools(Toolkit):
                 "error",
                 action=action,
                 message="attachment_ids and attachment_file_paths are only supported for send, reply, and thread-reply actions.",
+            )
+        if as_voice and not supports_attachments:
+            return self._payload(
+                "error",
+                action=action,
+                message="as_voice is only supported for send, reply, and thread-reply actions.",
             )
         if supports_attachments and attachment_count > self._MAX_ATTACHMENTS_PER_CALL:
             return self._payload(
@@ -171,6 +178,7 @@ class MatrixMessageTools(Toolkit):
         target: str | None = None,
         thread_id: str | None = None,
         ignore_mentions: bool = True,
+        as_voice: bool = False,
         limit: int | None = None,
         page_token: str | None = None,
     ) -> str:
@@ -226,6 +234,7 @@ class MatrixMessageTools(Toolkit):
         - `attachment_file_paths` are local file paths that will be registered into the current attachment context before sending.
         - The combined limit of `attachment_ids` plus `attachment_file_paths` is 5 per call.
         - A send or reply call may include text, attachments, or both, but not neither.
+        - `as_voice=True` marks successful audio attachments as Matrix voice messages and is only valid for send, reply, and thread-reply.
 
         Args:
             action (str): Supported actions are `send`, `reply`, `thread-reply`, `react`, `read`, `room-threads`, `thread-list`, `edit`, and `context`; they send text or attachments, react to an event, read messages, list room thread roots or thread messages, edit a prior event, or return targeting metadata.
@@ -236,6 +245,7 @@ class MatrixMessageTools(Toolkit):
             target (str | None): Event ID to react to for `react` or to edit for `edit`.
             thread_id (str | None): Optional explicit thread target; `thread_id="room"` forces room-level scope instead of inheriting the current thread.
             ignore_mentions (bool): Text-send safety flag for `send`, `reply`, and `thread-reply`; default `True` writes `com.mindroom.skip_mentions=True` to suppress mention-triggered agent dispatch, while `False` keeps mentions active and also writes `com.mindroom.original_sender=<human requester id>` when the requester is not the sending bot.
+            as_voice (bool): When true for `send`, `reply`, or `thread-reply`, prepare audio attachments as Matrix voice messages. Ignored by default.
             limit (int | None): Maximum messages returned for `read` or `thread-list`, or thread roots returned for `room-threads`; defaults to 20 and is capped at 50.
             page_token (str | None): Pagination token for `room-threads`, returned by a previous `room-threads` call to fetch the next page of thread roots.
 
@@ -272,6 +282,7 @@ class MatrixMessageTools(Toolkit):
             action=normalized_action,
             room_id=resolved_room_id,
             attachment_count=attachment_count,
+            as_voice=as_voice,
         )
         if validation_error is not None:
             return validation_error
@@ -303,6 +314,7 @@ class MatrixMessageTools(Toolkit):
             target=target,
             thread_id=thread_id,
             ignore_mentions=ignore_mentions,
+            as_voice=as_voice,
             read_limit=self._read_limit(limit),
             page_token=page_token,
             room_timeline_sentinel=self._ROOM_TIMELINE_SENTINEL,

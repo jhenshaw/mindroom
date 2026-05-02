@@ -268,6 +268,7 @@ async def send_attachment_paths(
     room_id: str,
     thread_id: str | None,
     attachment_paths: list[Path],
+    as_voice: bool = False,
 ) -> tuple[list[str], str | None]:
     """Upload local attachment paths to Matrix, preserving order."""
     attachment_event_ids: list[str] = []
@@ -286,6 +287,7 @@ async def send_attachment_paths(
             thread_id=thread_id,
             latest_thread_event_id=latest_thread_event_id,
             conversation_cache=context.conversation_cache,
+            as_voice=as_voice,
         )
         if attachment_event_id is None:
             return attachment_event_ids, f"Failed to send attachment: {attachment_path}"
@@ -303,6 +305,7 @@ async def send_context_attachments(
     thread_id: str | None = None,
     require_joined_room: bool = True,
     inherit_context_thread: bool = True,
+    as_voice: bool = False,
 ) -> tuple[_AttachmentSendResult | None, str | None]:
     """Resolve and send context-scoped attachments to Matrix."""
     attachment_paths, resolved_attachment_ids, newly_registered_attachment_ids, resolve_error = (
@@ -339,6 +342,7 @@ async def send_context_attachments(
         room_id=effective_room_id,
         thread_id=effective_thread_id,
         attachment_paths=attachment_paths,
+        as_voice=as_voice,
     )
     result = _AttachmentSendResult(
         room_id=effective_room_id,
