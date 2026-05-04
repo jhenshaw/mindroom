@@ -46,6 +46,7 @@ depends_on = [
     "mindroom.media_inputs",
     "mindroom.memory",
     "mindroom.metadata_merge",
+    "mindroom.prepared_conversation_chain",
     "mindroom.timing",
     "mindroom.tool_system.events",
 ]
@@ -391,6 +392,7 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.matrix.client_visible_messages",
     "mindroom.metadata_merge",
+    "mindroom.prepared_conversation_chain",
     "mindroom.routing",
     "mindroom.teams",
     "mindroom.tool_system.events",
@@ -655,7 +657,6 @@ depends_on = [
     "mindroom.history",
     "mindroom.matrix.client_visible_messages",
     "mindroom.prepared_conversation_chain",
-    "mindroom.streaming",
 ]
 
 [[modules]]
@@ -663,8 +664,13 @@ path = "mindroom.prepared_conversation_chain"
 depends_on = [
     "mindroom.constants",
     "mindroom.matrix.client_visible_messages",
+    "mindroom.partial_reply_text",
     "mindroom.token_budget",
 ]
+
+[[modules]]
+path = "mindroom.partial_reply_text"
+depends_on = []
 
 [[modules]]
 path = "mindroom.history"
@@ -993,6 +999,7 @@ depends_on = [
     "mindroom.media_inputs",
     "mindroom.metadata_merge",
     "mindroom.model_loading",
+    "mindroom.prepared_conversation_chain",
     "mindroom.team_exact_members",
     "mindroom.tool_system.events",
 ]
@@ -2015,6 +2022,7 @@ depends_on = [
     "mindroom.matrix.mentions",
     "mindroom.message_target",
     "mindroom.orchestration.runtime",
+    "mindroom.partial_reply_text",
     "mindroom.streaming_delivery",
     "mindroom.streaming_warmup",
     "mindroom.tool_system.runtime_context",

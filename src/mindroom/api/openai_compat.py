@@ -40,8 +40,11 @@ from mindroom.agent_run_context import prepend_knowledge_availability_notice
 from mindroom.ai import AIStreamChunk, ai_response, stream_agent_response
 from mindroom.api import config_lifecycle
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
-from mindroom.execution_preparation import render_prepared_team_messages_text
-from mindroom.history import ScopeSessionContext, close_team_runtime_state_dbs, open_bound_scope_session_context
+from mindroom.history import (
+    ScopeSessionContext,
+    close_team_runtime_state_dbs,
+    open_bound_scope_session_context,
+)
 from mindroom.knowledge import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access
 from mindroom.llm_request_logging import (
     bind_llm_request_log_context,
@@ -50,6 +53,7 @@ from mindroom.llm_request_logging import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+from mindroom.prepared_conversation_chain import render_prepared_team_messages_text
 from mindroom.routing import suggest_responder
 from mindroom.teams import (
     TeamMode,
