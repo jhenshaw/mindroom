@@ -1,5 +1,10 @@
 """Persisted history compaction helpers."""
 
+from mindroom.history.agno_compaction_request import (
+    agent_tool_definition_payloads_for_logging,
+    compute_prompt_token_breakdown,
+    team_tool_definition_payloads_for_logging,
+)
 from mindroom.history.compaction import (
     normalize_compaction_budget_tokens,
 )
@@ -12,11 +17,6 @@ from mindroom.history.policy import (
     context_budget_after_reserve,
     manual_compaction_unavailable_message,
     resolve_history_execution_plan,
-)
-from mindroom.history.provider_request import (
-    agent_tool_definition_payloads_for_logging,
-    compute_prompt_token_breakdown,
-    team_tool_definition_payloads_for_logging,
 )
 from mindroom.history.runtime import (
     PreparedScopeHistory,
