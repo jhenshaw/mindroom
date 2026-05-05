@@ -14,8 +14,13 @@ from agno.utils.models.claude import format_messages
 
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.model_loading import get_model_instance
+from mindroom.constants import (
+    MINDROOM_COMPACTION_PROVIDER_TIMEOUT_SECONDS,
+    MINDROOM_COMPACTION_SUMMARY_MAX_TOKENS,
+    RuntimePaths,
+    resolve_runtime_paths,
+)
+from mindroom.model_loading import configure_model_for_compaction, get_model_instance
 from mindroom.startup_errors import PermanentStartupError
 from mindroom.vertex_claude_compat import MindroomVertexAIClaude, _strip_vertex_claude_tool_strict
 from mindroom.vertex_claude_prompt_cache import (
@@ -301,6 +306,29 @@ def test_vertexai_claude_provider() -> None:
     assert model.provider == "VertexAI"
     assert model.cache_system_prompt is True
     assert model.extended_cache_time is True
+
+
+def test_configure_model_for_compaction_disables_reply_oriented_claude_settings() -> None:
+    """Compaction should not spend its own timeout on SDK retries or prompt-cache setup."""
+    model = MindroomVertexAIClaude(
+        id="claude-sonnet-4-6",
+        project_id="demo-project",
+        region="us-central1",
+        cache_system_prompt=True,
+        extended_cache_time=True,
+        max_tokens=8192,
+        timeout=300.0,
+        client_params={"max_retries": 2, "custom": "keep"},
+    )
+
+    configured = configure_model_for_compaction(model)
+
+    assert configured is model
+    assert model.cache_system_prompt is False
+    assert model.extended_cache_time is False
+    assert model.max_tokens == MINDROOM_COMPACTION_SUMMARY_MAX_TOKENS
+    assert model.timeout == MINDROOM_COMPACTION_PROVIDER_TIMEOUT_SECONDS
+    assert model.client_params == {"max_retries": 0, "custom": "keep"}
 
 
 def test_vertexai_prompt_cache_breakpoint_marks_last_user_block() -> None:

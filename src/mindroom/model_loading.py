@@ -14,7 +14,12 @@ from agno.models.openai import OpenAIChat
 from agno.models.openrouter import OpenRouter
 
 from mindroom.codex_model import CodexResponses, derive_codex_prompt_cache_key, normalize_codex_model_id
-from mindroom.constants import RuntimePaths, runtime_env_path
+from mindroom.constants import (
+    MINDROOM_COMPACTION_PROVIDER_TIMEOUT_SECONDS,
+    MINDROOM_COMPACTION_SUMMARY_MAX_TOKENS,
+    RuntimePaths,
+    runtime_env_path,
+)
 from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
 from mindroom.google_adc import load_google_application_credentials
@@ -33,7 +38,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-__all__ = ["get_model_instance"]
+__all__ = ["configure_model_for_compaction", "get_model_instance"]
 
 
 def _canonical_provider(provider: str) -> str:
@@ -171,4 +176,25 @@ def get_model_instance(
             default_log_dir=runtime_paths.storage_root / "logs" / "llm_requests",
         )
     install_vertex_claude_prompt_cache_hook(model)
+    return model
+
+
+def configure_model_for_compaction(model: Model) -> Model:
+    """Tune a freshly-created model for deterministic background summary calls."""
+    if isinstance(model, Claude):
+        model.cache_system_prompt = False
+        model.extended_cache_time = False
+        model.max_tokens = (
+            min(model.max_tokens, MINDROOM_COMPACTION_SUMMARY_MAX_TOKENS)
+            if model.max_tokens
+            else (MINDROOM_COMPACTION_SUMMARY_MAX_TOKENS)
+        )
+        model.timeout = (
+            min(model.timeout, MINDROOM_COMPACTION_PROVIDER_TIMEOUT_SECONDS)
+            if model.timeout
+            else (MINDROOM_COMPACTION_PROVIDER_TIMEOUT_SECONDS)
+        )
+        client_params = dict(model.client_params or {})
+        client_params["max_retries"] = 0
+        model.client_params = client_params
     return model

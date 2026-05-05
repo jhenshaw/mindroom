@@ -104,7 +104,8 @@ def _load_compaction_model(
     model_name: str,
 ) -> Model:
     """Load the compaction model with dedicated history-preparation timing."""
-    return model_loading.get_model_instance(config, runtime_paths, model_name)
+    model = model_loading.get_model_instance(config, runtime_paths, model_name)
+    return model_loading.configure_model_for_compaction(model)
 
 
 @dataclass(frozen=True)
