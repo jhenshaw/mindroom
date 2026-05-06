@@ -39,6 +39,14 @@ provisioner:
     emailHeader: ""
     matrixUserIdHeader: ""
     emailToMatrixUserIdTemplate: ""
+    requireJwt: "false"
+    jwtHeader: ""
+    jwksUrl: ""
+    jwtAudience: ""
+    jwtIssuer: ""
+    jwtEmailClaim: "email"
+    jwtUserIdClaim: ""
+    jwtMatrixUserIdClaim: ""
 
 # Optional AI API keys
 apiKeys:
