@@ -300,9 +300,9 @@ def _normalize_approval_arguments(tool_name: str, arguments: dict[str, Any]) -> 
     if normalized_hostname is None:
         return normalized_arguments
 
-    host_key = _first_argument_key(normalized_arguments, _HOSTNAME_ARGUMENT_KEYS)
-    if host_key is not None:
-        normalized_arguments[host_key] = normalized_hostname
+    for host_key in _HOSTNAME_ARGUMENT_KEYS:
+        if host_key in normalized_arguments and normalized_arguments[host_key] is not None:
+            normalized_arguments[host_key] = normalized_hostname
     return normalized_arguments
 
 
@@ -491,6 +491,7 @@ class _ApprovalManager:
             approval_id=approval_id,
             tool_name=tool_name,
             arguments=event_arguments,
+            approval_metadata_arguments=approval_arguments,
             arguments_truncated=arguments_truncated,
             agent_name=agent_name,
             thread_id=thread_id,
@@ -1274,6 +1275,7 @@ class _ApprovalManager:
         approval_id: str,
         tool_name: str,
         arguments: dict[str, Any],
+        approval_metadata_arguments: dict[str, Any] | None = None,
         arguments_truncated: bool,
         agent_name: str | None,
         thread_id: str | None,
@@ -1283,15 +1285,23 @@ class _ApprovalManager:
         expires_at: datetime,
         status: PendingApprovalStatus,
     ) -> dict[str, Any]:
-        normalized_arguments = _normalize_approval_arguments(tool_name, arguments)
+        metadata_arguments = _normalize_approval_arguments(
+            tool_name,
+            approval_metadata_arguments if approval_metadata_arguments is not None else arguments,
+        )
+        event_arguments = (
+            dict(arguments)
+            if approval_metadata_arguments is not None
+            else _normalize_approval_arguments(tool_name, arguments)
+        )
         normalized_hostname = (
-            _domain_grant_hostname(normalized_arguments)
-            if _is_domain_grant_approval(tool_name, normalized_arguments)
+            _domain_grant_hostname(metadata_arguments)
+            if _is_domain_grant_approval(tool_name, metadata_arguments)
             else None
         )
         approval_type = "domain_grant" if normalized_hostname is not None else "tool_action"
-        approval_reason = _approval_reason(normalized_arguments)
-        requested_ttl_seconds = _requested_ttl_seconds(normalized_arguments)
+        approval_reason = _approval_reason(metadata_arguments)
+        requested_ttl_seconds = _requested_ttl_seconds(metadata_arguments)
         content: dict[str, Any] = {
             "msgtype": "io.mindroom.tool_approval",
             "body": _ApprovalManager._event_body(
@@ -1305,7 +1315,7 @@ class _ApprovalManager:
             ),
             "tool_name": tool_name,
             "tool_call_id": approval_id,
-            "arguments": normalized_arguments,
+            "arguments": event_arguments,
             "status": status,
             "approval_id": approval_id,
             "approval_type": approval_type,

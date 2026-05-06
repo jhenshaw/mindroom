@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, call
@@ -2423,6 +2424,78 @@ async def test_domain_grant_allows_matching_hostname_and_url(tmp_path: Path) -> 
     assert decision is None
     assert arguments["hostname"] == "good.com"
     assert arguments["url"] == "https://good.com/path"
+
+
+@pytest.mark.asyncio
+async def test_domain_grant_preview_truncation_preserves_host_metadata(tmp_path: Path) -> None:
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    store = initialize_approval_store(test_runtime_paths(tmp_path), sender=sender)
+
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="network_access",
+            arguments={
+                "approval_kind": "domain_grant",
+                "hostname": "docs.example.com",
+                "ttl_seconds": 900,
+                "reason": "Fetch public documentation.",
+                **{f"extra_{index}": "x" * 80 for index in range(40)},
+            },
+            room_id="!room:localhost",
+            agent_name="code",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    try:
+        await _wait_for_pending(store, sender=sender)
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+    card = sender.await_args.args[2]
+    assert card["arguments_truncated"] is True
+    assert card["approval_type"] == "domain_grant"
+    assert card["normalized_hostname"] == "docs.example.com"
+    assert card["requested_ttl_seconds"] == 900
+    assert card["approval_reason"] == "Fetch public documentation."
+    assert card["body"] == (
+        "Domain grant approval required: hostname=docs.example.com; ttl=900s; "
+        "agent=code; tool=network_access; reason=Fetch public documentation."
+    )
+
+
+@pytest.mark.asyncio
+async def test_domain_grant_normalizes_all_host_arguments_before_tool_continues(tmp_path: Path) -> None:
+    arguments = {
+        "approval_kind": "domain_grant",
+        "hostname": "HTTPS://Sub.Example.COM/path",
+        "host": "Sub.Example.COM.",
+        "domain": "sub.example.com",
+        "target_host": "https://sub.example.com/status",
+        "ttl_seconds": 60,
+    }
+
+    decision = await request_tool_approval_for_call(
+        ToolApprovalCall(
+            config=_config(tmp_path),
+            runtime_paths=test_runtime_paths(tmp_path),
+            tool_name="network_access",
+            arguments=arguments,
+            agent_name="code",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            requester_id="@user:localhost",
+        ),
+    )
+
+    assert decision is None
+    assert arguments["hostname"] == "sub.example.com"
+    assert arguments["host"] == "sub.example.com"
+    assert arguments["domain"] == "sub.example.com"
+    assert arguments["target_host"] == "sub.example.com"
 
 
 def test_domain_grant_approval_payload_uses_normalized_hostname_and_warning() -> None:
