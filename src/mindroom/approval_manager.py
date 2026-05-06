@@ -354,6 +354,10 @@ def _domain_grant_ttl_is_valid(arguments: dict[str, Any]) -> bool:
         return False
 
 
+def _approval_body_field_text(value: str) -> str:
+    return " ".join(value.split()).replace(";", ",")
+
+
 def _domain_grant_event_subject(
     *,
     hostname: str | None,
@@ -364,7 +368,8 @@ def _domain_grant_event_subject(
 ) -> str:
     ttl = "unspecified" if requested_ttl_seconds is None else f"{requested_ttl_seconds}s"
     agent = agent_name or "unknown"
-    return f"hostname={hostname or 'unknown'}; ttl={ttl}; agent={agent}; tool={tool_name}; reason={reason}"
+    safe_reason = _approval_body_field_text(reason)
+    return f"hostname={hostname or 'unknown'}; ttl={ttl}; agent={agent}; tool={tool_name}; reason={safe_reason}"
 
 
 @dataclass(frozen=True, slots=True)
