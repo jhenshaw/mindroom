@@ -252,13 +252,6 @@ def _first_argument_value(arguments: dict[str, Any], keys: tuple[str, ...]) -> o
     return None
 
 
-def _first_argument_key(arguments: dict[str, Any], keys: tuple[str, ...]) -> str | None:
-    for key in keys:
-        if key in arguments:
-            return key
-    return None
-
-
 def _domain_grant_argument_hostnames(arguments: dict[str, Any]) -> tuple[str, ...] | None:
     hostnames: list[str] = []
     for key in (*_HOSTNAME_ARGUMENT_KEYS, *_URL_ARGUMENT_KEYS):
