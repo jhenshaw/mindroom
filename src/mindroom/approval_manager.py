@@ -267,11 +267,27 @@ def _approval_kind_value(arguments: dict[str, Any]) -> str | None:
     return value.strip().lower() if isinstance(value, str) and value.strip() else None
 
 
+def _domain_grant_argument_hostnames(arguments: dict[str, Any]) -> tuple[str, ...] | None:
+    hostnames: list[str] = []
+    for key in (*_HOSTNAME_ARGUMENT_KEYS, *_URL_ARGUMENT_KEYS):
+        value = arguments.get(key)
+        if value is None:
+            continue
+        hostname = _normalize_approval_hostname(value)
+        if hostname is None:
+            return None
+        hostnames.append(hostname)
+    return tuple(hostnames)
+
+
 def _domain_grant_hostname(arguments: dict[str, Any]) -> str | None:
-    hostname = _normalize_approval_hostname(_first_argument_value(arguments, _HOSTNAME_ARGUMENT_KEYS))
-    if hostname is not None:
-        return hostname
-    return _normalize_approval_hostname(_first_argument_value(arguments, _URL_ARGUMENT_KEYS))
+    hostnames = _domain_grant_argument_hostnames(arguments)
+    if not hostnames:
+        return None
+    hostname = hostnames[0]
+    if any(candidate != hostname for candidate in hostnames):
+        return None
+    return hostname
 
 
 def _is_domain_grant_approval(tool_name: str, arguments: dict[str, Any]) -> bool:
@@ -307,10 +323,6 @@ def _invalid_domain_grant_reason(tool_name: str, arguments: dict[str, Any]) -> s
         return None
     if _domain_grant_hostname(arguments) is None:
         return _INVALID_DOMAIN_GRANT_REASON
-    for key in (*_HOSTNAME_ARGUMENT_KEYS, *_URL_ARGUMENT_KEYS):
-        value = arguments.get(key)
-        if value is not None and _normalize_approval_hostname(value) is None:
-            return _INVALID_DOMAIN_GRANT_REASON
     return None
 
 
