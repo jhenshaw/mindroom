@@ -6,6 +6,7 @@ memberships. This test module verifies that behavior.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path  # noqa: TC003
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
@@ -269,6 +270,177 @@ async def test_router_accepts_authorized_invite_persists_and_rejoins_on_startup(
     await restarted_bot.join_configured_rooms()
 
     join_room.assert_awaited_once_with(restarted_bot.client, "!router-invited:localhost")
+
+
+@pytest.mark.asyncio
+async def test_router_deduplicates_concurrent_invite_callbacks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Duplicate invite callbacks for one room should join and welcome only once."""
+    config = bind_runtime_paths(
+        Config(router=RouterConfig(model="default", accept_invites=True)),
+        test_runtime_paths(tmp_path),
+    )
+    bot = AgentBot(
+        agent_user=_router_user(),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    bot.client = AsyncMock()
+    bot.client.rooms = {}
+
+    join_started = asyncio.Event()
+    release_join = asyncio.Event()
+
+    async def delayed_join_room(_client: AsyncMock, _room_id: str) -> bool:
+        join_started.set()
+        await release_join.wait()
+        return True
+
+    join_room = AsyncMock(side_effect=delayed_join_room)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.is_authorized_sender", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
+    bot.client.room_messages = AsyncMock(
+        return_value=nio.RoomMessagesResponse(
+            room_id="!router-invited:localhost",
+            chunk=[],
+            start="",
+            end=None,
+        ),
+    )
+    bot._send_response = AsyncMock(return_value="$welcome")
+
+    room = MagicMock(room_id="!router-invited:localhost")
+    room.canonical_alias = None
+    event = MagicMock(sender="@owner:localhost")
+
+    first_invite = asyncio.create_task(bot._on_invite(room, event))
+    await join_started.wait()
+    second_invite = asyncio.create_task(bot._on_invite(room, event))
+    release_join.set()
+
+    await asyncio.gather(first_invite, second_invite)
+
+    join_room.assert_awaited_once_with(bot.client, "!router-invited:localhost")
+    bot.client.room_messages.assert_awaited_once()
+    bot._send_response.assert_awaited_once()
+    assert bot._invited_rooms == {"!router-invited:localhost"}
+
+
+@pytest.mark.asyncio
+async def test_router_duplicate_invite_retries_failed_welcome_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Duplicate invite callbacks should retry welcome delivery after a failed first send."""
+    config = bind_runtime_paths(
+        Config(router=RouterConfig(model="default", accept_invites=True)),
+        test_runtime_paths(tmp_path),
+    )
+    bot = AgentBot(
+        agent_user=_router_user(),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    bot.client = AsyncMock()
+    bot.client.rooms = {}
+    bot.client.room_messages = AsyncMock(
+        return_value=nio.RoomMessagesResponse(
+            room_id="!router-invited:localhost",
+            chunk=[],
+            start="",
+            end=None,
+        ),
+    )
+    bot._send_response = AsyncMock(side_effect=[None, "$welcome"])
+
+    join_room = AsyncMock(return_value=True)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.is_authorized_sender", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
+
+    room = MagicMock(room_id="!router-invited:localhost")
+    room.canonical_alias = None
+    event = MagicMock(sender="@owner:localhost")
+
+    await bot._on_invite(room, event)
+    await bot._on_invite(room, event)
+
+    join_room.assert_awaited_once_with(bot.client, "!router-invited:localhost")
+    assert bot.client.room_messages.await_count == 2
+    assert bot._send_response.await_count == 2
+    assert bot._invited_rooms == {"!router-invited:localhost"}
+
+
+@pytest.mark.asyncio
+async def test_router_welcome_send_is_idempotent_for_concurrent_empty_room_checks(
+    tmp_path: Path,
+) -> None:
+    """Concurrent empty-room checks should not emit duplicate welcome messages."""
+    config = bind_runtime_paths(
+        Config(router=RouterConfig(model="default", accept_invites=True)),
+        test_runtime_paths(tmp_path),
+    )
+    bot = AgentBot(
+        agent_user=_router_user(),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    bot.client = AsyncMock()
+    bot.client.room_messages = AsyncMock(
+        return_value=nio.RoomMessagesResponse(
+            room_id="!empty:localhost",
+            chunk=[],
+            start="",
+            end=None,
+        ),
+    )
+    bot._send_response = AsyncMock(return_value="$welcome")
+
+    await asyncio.gather(
+        bot._send_welcome_message_if_empty("!empty:localhost"),
+        bot._send_welcome_message_if_empty("!empty:localhost"),
+        bot._send_welcome_message_if_empty("!empty:localhost"),
+    )
+
+    bot.client.room_messages.assert_awaited_once()
+    bot._send_response.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_router_welcome_send_retries_after_delivery_failure(
+    tmp_path: Path,
+) -> None:
+    """A failed welcome delivery should not suppress a later retry."""
+    config = bind_runtime_paths(
+        Config(router=RouterConfig(model="default", accept_invites=True)),
+        test_runtime_paths(tmp_path),
+    )
+    bot = AgentBot(
+        agent_user=_router_user(),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    bot.client = AsyncMock()
+    bot.client.room_messages = AsyncMock(
+        return_value=nio.RoomMessagesResponse(
+            room_id="!empty:localhost",
+            chunk=[],
+            start="",
+            end=None,
+        ),
+    )
+    bot._send_response = AsyncMock(side_effect=[None, "$welcome"])
+
+    await bot._send_welcome_message_if_empty("!empty:localhost")
+    await bot._send_welcome_message_if_empty("!empty:localhost")
+
+    assert bot.client.room_messages.await_count == 2
+    assert bot._send_response.await_count == 2
 
 
 @pytest.mark.asyncio
