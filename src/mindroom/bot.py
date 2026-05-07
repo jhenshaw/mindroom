@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import dataclass
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
@@ -24,6 +25,7 @@ from mindroom.hooks import (
     EVENT_AGENT_STOPPED,
     EVENT_BOT_READY,
     EVENT_REACTION_RECEIVED,
+    EVENT_ROOM_MEMBER_JOINED,
     AgentLifecycleContext,
     EnrichmentItem,
     HookContextSupport,
@@ -31,6 +33,7 @@ from mindroom.hooks import (
     HookRegistryState,
     MessageEnvelope,
     ReactionReceivedContext,
+    RoomMemberJoinedContext,
     emit,
     send_hook_message,
 )
@@ -85,6 +88,12 @@ from .logging_config import get_logger
 from .matrix.avatar import check_and_set_avatar
 from .matrix.client_room_admin import get_joined_rooms
 from .matrix.client_session import PermanentMatrixStartupError
+from .matrix.room_member_joins import (
+    RoomMemberJoin,
+    room_member_join_from_event,
+    room_member_joins_from_sync_state,
+    room_member_joins_from_sync_timeline,
+)
 from .media_inputs import MediaInputs
 from .response_runner import ResponseRequest, ResponseRunner, ResponseRunnerDeps, prepare_memory_and_model_context
 from .scheduling import (
@@ -125,6 +134,15 @@ __all__ = ["AgentBot", "TeamBot", "create_bot_for_entity"]
 # Constants
 _SYNC_TIMEOUT_MS = 30000
 _STOPPING_RESPONSE_TEXT = "⏹️ Stopping generation..."
+
+
+@dataclass(frozen=True, slots=True)
+class _RoomMemberJoinSyncHookPlan:
+    """Room-member join hook actions derived from one sync response."""
+
+    arm_after_response: bool = True
+    emit_state: bool = False
+    emit_timeline: bool = False
 
 
 def _create_task_wrapper(
@@ -274,6 +292,8 @@ class AgentBot:
     _knowledge_access_support: KnowledgeAccessSupport
     _deferred_overdue_task_drain_task: asyncio.Task[None] | None
     _startup_thread_prewarm_task: asyncio.Task[None] | None
+    _room_member_callback_registered: bool
+    _room_member_join_hooks_armed: bool
     _turn_controller: TurnController
     _room_lifecycle: BotRoomLifecycle
     _invited_rooms: set[str]
@@ -304,6 +324,8 @@ class AgentBot:
         self._sync_trust_state = SyncTrustState.COLD
         self._sync_checkpoint: SyncCheckpoint | None = None
         self._hook_registry_state = HookRegistryState(HookRegistry.empty())
+        self._room_member_callback_registered = False
+        self._room_member_join_hooks_armed = False
         self._runtime_view = BotRuntimeState(
             client=None,
             config=config,
@@ -748,6 +770,25 @@ class AgentBot:
         )
         await emit(self.hook_registry, EVENT_REACTION_RECEIVED, context)
 
+    async def _emit_room_member_joined_hooks(self, join: RoomMemberJoin) -> None:
+        """Emit room:member_joined for one live human Matrix room join."""
+        if not self.hook_registry.has_hooks(EVENT_ROOM_MEMBER_JOINED):
+            return
+
+        context = RoomMemberJoinedContext(
+            **self._hook_context_support.base_kwargs(EVENT_ROOM_MEMBER_JOINED, join.event_id),
+            agent_name=self.agent_name,
+            room_id=join.room_id,
+            event_id=join.event_id,
+            user_id=join.user_id,
+            sender_id=join.sender_id,
+            display_name=join.display_name,
+            avatar_url=join.avatar_url,
+            membership=join.membership,
+            prev_membership=join.prev_membership,
+        )
+        await emit(self.hook_registry, EVENT_ROOM_MEMBER_JOINED, context)
+
     async def _emit_agent_lifecycle_event(
         self,
         event_name: str,
@@ -1014,9 +1055,67 @@ class AgentBot:
             return None
         return time.monotonic() - self._last_sync_monotonic
 
+    def _register_room_member_callback_after_initial_sync(self) -> None:
+        """Start listening for live member joins after startup history is drained."""
+        if self.agent_name != ROUTER_AGENT_NAME or self._room_member_callback_registered:
+            return
+        client = self.client
+        if client is None:
+            return
+        client.add_event_callback(self._create_room_member_task_wrapper(), nio.RoomMemberEvent)
+        self._room_member_callback_registered = True
+
+    def _create_room_member_task_wrapper(self) -> Callable[[nio.MatrixRoom, nio.Event], Awaitable[None]]:
+        """Return a background callback that preserves delivery-time hook arming."""
+
+        async def wrapper(room: nio.MatrixRoom, event: nio.Event) -> None:
+            if not isinstance(event, nio.RoomMemberEvent):
+                return
+            hooks_armed_at_delivery = self._first_sync_done and self._room_member_join_hooks_armed
+
+            async def error_handler() -> None:
+                try:
+                    await self._on_room_member(
+                        room,
+                        event,
+                        hooks_armed_at_delivery=hooks_armed_at_delivery,
+                    )
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    logger.exception("Error in event callback")
+
+            create_background_task(error_handler(), owner=self._runtime_view)
+
+        return wrapper
+
+    def _room_member_join_sync_hook_plan(
+        self,
+        *,
+        first_sync_response: bool,
+        restored_token_first_sync_response: bool,
+        hooks_were_armed: bool,
+        decision: SyncCertificationDecision,
+    ) -> _RoomMemberJoinSyncHookPlan:
+        """Return room-member join hook actions for one certified sync response."""
+        if decision.reset_client_token:
+            return _RoomMemberJoinSyncHookPlan(arm_after_response=False)
+        # The first restored-token sync is requested with full_state=True, so its
+        # state block is a current snapshot. Only the timeline is a catch-up stream.
+        emit_certified_state = (
+            decision.state is SyncTrustState.CERTIFIED and not first_sync_response and hooks_were_armed
+        )
+        return _RoomMemberJoinSyncHookPlan(
+            arm_after_response=True,
+            emit_state=emit_certified_state,
+            emit_timeline=restored_token_first_sync_response,
+        )
+
     async def _on_sync_response(self, _response: nio.SyncResponse) -> None:
         """Track successful sync responses for health checks and watchdogs."""
         first_sync_response = not self._first_sync_done
+        room_member_join_hooks_were_armed = self._room_member_join_hooks_armed
+        room_member_join_hook_plan = _RoomMemberJoinSyncHookPlan()
         self.last_sync_time = mark_matrix_sync_success(self.agent_name)
         self._last_sync_monotonic = time.monotonic()
 
@@ -1024,6 +1123,9 @@ class AgentBot:
             return
 
         if isinstance(_response, nio.SyncResponse):
+            restored_token_first_sync_response = (
+                first_sync_response and self._sync_trust_state is SyncTrustState.PENDING
+            )
             try:
                 cache_result = await self._sync_cache_result_for_certification(_response)
             except asyncio.CancelledError as exc:
@@ -1041,9 +1143,23 @@ class AgentBot:
                 first_sync_response=first_sync_response,
             )
             self._apply_sync_certification_decision(decision, cache_result=cache_result)
+            room_member_join_hook_plan = self._room_member_join_sync_hook_plan(
+                first_sync_response=first_sync_response,
+                restored_token_first_sync_response=restored_token_first_sync_response,
+                hooks_were_armed=room_member_join_hooks_were_armed,
+                decision=decision,
+            )
         self._first_sync_done = True
+        self._room_member_join_hooks_armed = room_member_join_hook_plan.arm_after_response
+
+        if isinstance(_response, nio.SyncResponse):
+            if room_member_join_hook_plan.emit_timeline:
+                await self._emit_room_member_joined_sync_timeline_hooks(_response)
+            if room_member_join_hook_plan.emit_state:
+                await self._emit_room_member_joined_sync_state_hooks(_response)
 
         if first_sync_response:
+            self._register_room_member_callback_after_initial_sync()
             await self._emit_agent_lifecycle_event(EVENT_BOT_READY)
             orchestrator = self.orchestrator
             if orchestrator is not None:
@@ -1059,6 +1175,7 @@ class AgentBot:
         self._last_sync_monotonic = time.monotonic()
         if _response.status_code == "M_UNKNOWN_POS":
             self._apply_sync_certification_decision(handle_unknown_pos())
+            self._room_member_join_hooks_armed = False
             self.logger.warning(
                 "matrix_sync_token_rejected",
                 status_code=_response.status_code,
@@ -1218,6 +1335,8 @@ class AgentBot:
         self.last_sync_time = None
         self._last_sync_monotonic = None
         self._first_sync_done = False
+        self._room_member_join_hooks_armed = False
+        self._room_member_callback_registered = False
         clear_matrix_sync_state(self.agent_name)
         await self._emit_agent_lifecycle_event(EVENT_AGENT_STOPPED, stop_reason=reason)
 
@@ -1375,6 +1494,70 @@ class AgentBot:
         """Handle reaction events for interactive questions, stop functionality, and config confirmations."""
         async with self._conversation_resolver.turn_thread_cache_scope():
             await self._handle_reaction_inner(room, event)
+
+    async def _on_room_member(
+        self,
+        room: nio.MatrixRoom,
+        event: nio.RoomMemberEvent,
+        *,
+        hooks_armed_at_delivery: bool | None = None,
+    ) -> None:
+        """Expose live human room joins to router-owned hooks."""
+        hooks_armed = self._room_member_join_hooks_armed if hooks_armed_at_delivery is None else hooks_armed_at_delivery
+        if self.agent_name != ROUTER_AGENT_NAME or not self._first_sync_done or not hooks_armed:
+            return
+        if not self.hook_registry.has_hooks(EVENT_ROOM_MEMBER_JOINED):
+            return
+
+        join = room_member_join_from_event(
+            room,
+            event,
+            config=self.config,
+            runtime_paths=self.runtime_paths,
+            storage_root=self.runtime_paths.storage_root,
+        )
+        if join is None:
+            return
+
+        await self._emit_room_member_joined_hooks(join)
+
+    async def _emit_room_member_joined_sync_state_hooks(self, response: nio.SyncResponse) -> None:
+        """Expose human joins that matrix-nio delivers through sync room state."""
+        if self.agent_name != ROUTER_AGENT_NAME or not self._first_sync_done or not self._room_member_join_hooks_armed:
+            return
+        if not self.hook_registry.has_hooks(EVENT_ROOM_MEMBER_JOINED):
+            return
+        client = self.client
+        if client is None:
+            return
+
+        for join in room_member_joins_from_sync_state(
+            response,
+            rooms=client.rooms,
+            config=self.config,
+            runtime_paths=self.runtime_paths,
+            storage_root=self.runtime_paths.storage_root,
+        ):
+            await self._emit_room_member_joined_hooks(join)
+
+    async def _emit_room_member_joined_sync_timeline_hooks(self, response: nio.SyncResponse) -> None:
+        """Expose human joins from a restored-token catch-up sync timeline."""
+        if self.agent_name != ROUTER_AGENT_NAME or not self._first_sync_done or not self._room_member_join_hooks_armed:
+            return
+        if not self.hook_registry.has_hooks(EVENT_ROOM_MEMBER_JOINED):
+            return
+        client = self.client
+        if client is None:
+            return
+
+        for join in room_member_joins_from_sync_timeline(
+            response,
+            rooms=client.rooms,
+            config=self.config,
+            runtime_paths=self.runtime_paths,
+            storage_root=self.runtime_paths.storage_root,
+        ):
+            await self._emit_room_member_joined_hooks(join)
 
     async def _on_unknown_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
         """Handle custom Matrix events that are not part of nio's typed event set."""
