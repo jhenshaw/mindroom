@@ -17,7 +17,7 @@ from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
 
 import mindroom.tools  # noqa: F401
-from mindroom import agent_prompts, agent_storage, constants, model_loading
+from mindroom import agent_storage, constants, model_loading
 from mindroom.agent_descriptions import describe_agent
 from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent as Agent
 from mindroom.agent_knowledge_descriptions import knowledge_source_descriptions
@@ -26,6 +26,7 @@ from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.hooks import HookRegistry
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import MatrixID
+from mindroom.prompt_templates import build_agent_identity_context, render_prompt_template
 from mindroom.runtime_resolution import (
     ResolvedAgentRuntime,
     resolve_agent_runtime,
@@ -145,11 +146,16 @@ def ensure_default_agent_workspaces(config: Config, storage_path: Path) -> None:
             _ensure_default_mind_workspace(storage_path)
 
 
-def _get_datetime_context(timezone_str: str) -> str:
+def _get_datetime_context(
+    timezone_str: str,
+    *,
+    datetime_context_template: str,
+) -> str:
     """Generate current date context for the agent.
 
     Args:
         timezone_str: Timezone string (e.g., 'America/New_York', 'UTC')
+        datetime_context_template: Prompt template used for the rendered date context.
 
     Returns:
         Formatted string with current date and timezone information
@@ -161,11 +167,12 @@ def _get_datetime_context(timezone_str: str) -> str:
     date_str = now.strftime("%A, %B %d, %Y")
     timezone_abbrev = now.tzname() or timezone_str
 
-    return f"""## Current Date and Time
-Today is {date_str}.
-Timezone: {timezone_str} ({timezone_abbrev})
-
-"""
+    return render_prompt_template(
+        datetime_context_template,
+        date_str=date_str,
+        timezone_str=timezone_str,
+        timezone_abbrev=timezone_abbrev,
+    )
 
 
 def _load_context_files(
@@ -214,9 +221,13 @@ def _render_context_chunks(section_heading: str, chunks: list[_AdditionalContext
     return f"{section_heading}\n" + "\n\n".join(rendered) + "\n\n"
 
 
-def _render_additional_context(personality_chunks: list[_AdditionalContextChunk]) -> str:
+def _render_additional_context(
+    personality_chunks: list[_AdditionalContextChunk],
+    *,
+    section_heading: str,
+) -> str:
     """Render full additional context from personality chunks."""
-    return _render_context_chunks("## Personality Context", personality_chunks)
+    return _render_context_chunks(section_heading, personality_chunks)
 
 
 def _build_preload_truncation_groups(
@@ -230,12 +241,17 @@ def _drop_whole_chunks(
     groups: list[list[_AdditionalContextChunk]],
     personality_chunks: list[_AdditionalContextChunk],
     max_preload_chars: int,
+    *,
+    section_heading: str,
 ) -> int:
     """Drop entire chunk bodies (least critical first) until under the cap."""
     omitted = 0
     for group in groups:
         for chunk in group:
-            if len(_render_additional_context(personality_chunks)) <= max_preload_chars:
+            if (
+                len(_render_additional_context(personality_chunks, section_heading=section_heading))
+                <= max_preload_chars
+            ):
                 return omitted
             if not chunk.body:
                 continue
@@ -248,12 +264,16 @@ def _trim_chunk_tails(
     groups: list[list[_AdditionalContextChunk]],
     personality_chunks: list[_AdditionalContextChunk],
     max_preload_chars: int,
+    *,
+    section_heading: str,
 ) -> int:
     """Trim from the *end* of chunks to preserve headers/identity at the top."""
     omitted = 0
     for group in groups:
         for chunk in group:
-            overflow = len(_render_additional_context(personality_chunks)) - max_preload_chars
+            overflow = (
+                len(_render_additional_context(personality_chunks, section_heading=section_heading)) - max_preload_chars
+            )
             if overflow <= 0:
                 return omitted
             if not chunk.body:
@@ -264,25 +284,41 @@ def _trim_chunk_tails(
     return omitted
 
 
-def _apply_preload_cap(personality_chunks: list[_AdditionalContextChunk], max_preload_chars: int) -> tuple[str, int]:
+def _apply_preload_cap(
+    personality_chunks: list[_AdditionalContextChunk],
+    max_preload_chars: int,
+    *,
+    section_heading: str,
+    truncation_marker_template: str,
+) -> tuple[str, int]:
     """Apply hard preload cap with deterministic truncation priority.
 
     Truncation order is by file list order.
     First drops whole chunks, then trims from the *end* of remaining chunks.
     """
-    rendered = _render_additional_context(personality_chunks)
+    rendered = _render_additional_context(personality_chunks, section_heading=section_heading)
     if len(rendered) <= max_preload_chars:
         return rendered, 0
 
     groups = _build_preload_truncation_groups(personality_chunks)
-    omitted_chars = _drop_whole_chunks(groups, personality_chunks, max_preload_chars)
-    omitted_chars += _trim_chunk_tails(groups, personality_chunks, max_preload_chars)
+    omitted_chars = _drop_whole_chunks(
+        groups,
+        personality_chunks,
+        max_preload_chars,
+        section_heading=section_heading,
+    )
+    omitted_chars += _trim_chunk_tails(
+        groups,
+        personality_chunks,
+        max_preload_chars,
+        section_heading=section_heading,
+    )
 
-    rendered = _render_additional_context(personality_chunks)
+    rendered = _render_additional_context(personality_chunks, section_heading=section_heading)
     if omitted_chars <= 0:
         return rendered, 0
 
-    marker = f"[Content truncated - {omitted_chars} chars omitted. Use search_knowledge_base for older history.]"
+    marker = render_prompt_template(truncation_marker_template, omitted_chars=omitted_chars)
     marker_block = f"\n\n{marker}\n\n"
     budget = max_preload_chars - len(marker_block)
     if budget <= 0:
@@ -298,6 +334,8 @@ def _build_additional_context(
     agent_config: AgentConfig,
     max_preload_chars: int,
     *,
+    personality_section_heading: str,
+    truncation_marker_template: str,
     workspace_context_files: tuple[Path, ...] = (),
     storage_path: Path,
     runtime_paths: constants.RuntimePaths,
@@ -319,7 +357,12 @@ def _build_additional_context(
             storage_path,
         )
 
-    additional_context, omitted_chars = _apply_preload_cap(personality_chunks, max_preload_chars)
+    additional_context, omitted_chars = _apply_preload_cap(
+        personality_chunks,
+        max_preload_chars,
+        section_heading=personality_section_heading,
+        truncation_marker_template=truncation_marker_template,
+    )
     if omitted_chars > 0:
         logger.warning(
             "Preload context exceeded max_preload_chars and was truncated",
@@ -637,20 +680,6 @@ def _resolve_runtime_worker_tools(
     return default_worker_routed_tools(runtime_tool_names)
 
 
-# Rich prompt mapping - agents that use detailed prompts instead of simple roles
-_RICH_PROMPTS = {
-    "code": agent_prompts.CODE_AGENT_PROMPT,
-    "research": agent_prompts.RESEARCH_AGENT_PROMPT,
-    "calculator": agent_prompts.CALCULATOR_AGENT_PROMPT,
-    "general": agent_prompts.GENERAL_AGENT_PROMPT,
-    "shell": agent_prompts.SHELL_AGENT_PROMPT,
-    "summary": agent_prompts.SUMMARY_AGENT_PROMPT,
-    "finance": agent_prompts.FINANCE_AGENT_PROMPT,
-    "news": agent_prompts.NEWS_AGENT_PROMPT,
-    "data_analyst": agent_prompts.DATA_ANALYST_AGENT_PROMPT,
-}
-
-
 def _is_learning_enabled(agent_config: AgentConfig, defaults: DefaultsConfig) -> bool:
     """Check if learning is enabled for an agent, falling back to defaults."""
     learning = agent_config.learning if agent_config.learning is not None else defaults.learning
@@ -699,17 +728,11 @@ def _build_dynamic_tooling_instruction_block(
     current_toolkits = ", ".join(loaded_toolkits) if loaded_toolkits else "(none)"
     sticky_toolkits = ", ".join(agent_config.initial_toolkits) if agent_config.initial_toolkits else "(none)"
     toolkit_catalog = "\n".join(toolkit_lines)
-    return (
-        "## Dynamic Toolkits\n"
-        "You may manage optional tool bundles with the `dynamic_tools` tool.\n"
-        "Allowed toolkits:\n"
-        f"{toolkit_catalog}\n"
-        f"Currently loaded: {current_toolkits}\n"
-        f"Sticky initial toolkits that cannot be unloaded: {sticky_toolkits}\n"
-        "Use `list_toolkits()` when unsure which toolkit contains a capability.\n"
-        "Use `load_tools(toolkit)` or `unload_tools(toolkit)` to change the loaded set.\n"
-        "In team conversations, each member manages its own toolkit state, so loading one member does not load the others.\n"
-        "Those changes take effect on the next request in the same session, not later in this run."
+    return config.render_prompt(
+        "DYNAMIC_TOOLING_INSTRUCTION_TEMPLATE",
+        toolkit_catalog=toolkit_catalog,
+        current_toolkits=current_toolkits,
+        sticky_toolkits=sticky_toolkits,
     )
 
 
@@ -1103,16 +1126,21 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         config.get_domain(runtime_paths),
         runtime_paths,
     ).full_id
-    identity_context = agent_prompts.build_agent_identity_context(
+    identity_context = build_agent_identity_context(
         display_name=agent_config.display_name,
         matrix_id=matrix_id,
         model_provider=model_provider,
         model_id=model_id,
         include_openai_compat_guidance=include_openai_compat_guidance,
+        identity_context_template=config.get_prompt("AGENT_IDENTITY_CONTEXT_TEMPLATE"),
+        openai_compat_history_guidance=config.get_prompt("OPENAI_COMPAT_HISTORY_GUIDANCE"),
     )
 
     # Add current date context with the user's configured timezone
-    datetime_context = _get_datetime_context(config.timezone)
+    datetime_context = _get_datetime_context(
+        config.timezone,
+        datetime_context_template=config.get_prompt("DATETIME_CONTEXT_TEMPLATE"),
+    )
 
     # Combine identity and datetime contexts
     full_context = identity_context + datetime_context
@@ -1121,22 +1149,16 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         agent_name,
         agent_config,
         config.defaults.max_preload_chars,
+        personality_section_heading=config.get_prompt("PERSONALITY_CONTEXT_SECTION_HEADING"),
+        truncation_marker_template=config.get_prompt("CONTEXT_TRUNCATION_MARKER_TEMPLATE"),
         workspace_context_files=workspace.context_files if workspace is not None else (),
         storage_path=resolved_storage_path,
         runtime_paths=runtime_paths,
     )
 
-    # Use rich prompt if available, otherwise use YAML config
-    if agent_name in _RICH_PROMPTS:
-        logger.info("using_rich_prompt", agent=agent_name)
-        # Prepend full context to the rich prompt
-        role = full_context + _RICH_PROMPTS[agent_name]
-        instructions = []  # Instructions are in the rich prompt
-    else:
-        logger.info("using_yaml_agent_config", agent=agent_name)
-        # For YAML agents, prepend full context to role and keep original instructions
-        role = full_context + agent_config.role
-        instructions = list(agent_config.instructions)
+    logger.info("using_yaml_agent_config", agent=agent_name)
+    role = full_context + agent_config.role
+    instructions = list(agent_config.instructions)
 
     # Create agent with defaults applied
     model = _load_agent_model_instance(config, runtime_paths, model_name, execution_identity)
@@ -1154,7 +1176,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         workspace_skills_root=workspace.root / "skills" if workspace is not None else None,
     )
     if skills and skills.get_skill_names():
-        instructions.append(agent_prompts.SKILLS_TOOL_USAGE_PROMPT)
+        instructions.append(config.get_prompt("SKILLS_TOOL_USAGE_PROMPT"))
 
     dynamic_tooling_block = _build_dynamic_tooling_instruction_block(
         config,
@@ -1166,14 +1188,14 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         instructions.append(dynamic_tooling_block)
 
     if agent_runtime.tool_base_dir is not None:
-        instructions.append(agent_prompts.OUTPUT_REDIRECT_PROMPT)
+        instructions.append(config.get_prompt("OUTPUT_REDIRECT_PROMPT"))
 
     show_tool_calls = show_tool_calls_for_agent(config, agent_name)
     if not show_tool_calls:
-        instructions.append(agent_prompts.HIDDEN_TOOL_CALLS_PROMPT)
+        instructions.append(config.get_prompt("HIDDEN_TOOL_CALLS_PROMPT"))
 
     if include_interactive_questions:
-        instructions.append(agent_prompts.INTERACTIVE_QUESTION_PROMPT)
+        instructions.append(config.get_prompt("INTERACTIVE_QUESTION_PROMPT"))
 
     _log_toolkits_without_unique_model_functions(tools, agent_name=agent_name)
 

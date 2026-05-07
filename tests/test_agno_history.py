@@ -117,6 +117,7 @@ from mindroom.hooks import (
 )
 from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_name
 from mindroom.memory import MemoryPromptParts
+from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
 from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.thread_utils import create_session_id
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
@@ -979,7 +980,22 @@ async def test_compaction_call_timeout_raises_runtime_error() -> None:
         await _generate_compaction_summary(
             model=_SlowSummaryModel(id="summary-model", provider="fake"),
             summary_input="Current prompt",
+            summary_prompt=COMPACTION_SUMMARY_PROMPT,
         )
+
+
+@pytest.mark.asyncio
+async def test_compaction_summary_uses_configured_system_prompt() -> None:
+    """Compaction summaries should use the configured prompt text."""
+    model = RecordingModel(id="summary-model", provider="fake")
+
+    await _generate_compaction_summary(
+        model=model,
+        summary_input="Current prompt",
+        summary_prompt="Custom compaction instructions.",
+    )
+
+    assert model.seen_messages[0].content == "Custom compaction instructions."
 
 
 @pytest.mark.asyncio
@@ -1013,6 +1029,7 @@ async def test_compaction_call_timeout_returns_without_waiting_for_cancellation_
         await _generate_compaction_summary(
             model=model,
             summary_input="Current prompt",
+            summary_prompt=COMPACTION_SUMMARY_PROMPT,
         )
 
     assert asyncio.get_running_loop().time() - start < 0.04
@@ -1052,6 +1069,7 @@ async def test_compaction_call_timeout_raises_even_when_provider_returns_after_c
         await _generate_compaction_summary(
             model=model,
             summary_input="Current prompt",
+            summary_prompt=COMPACTION_SUMMARY_PROMPT,
         )
 
     await asyncio.wait_for(model.started.wait(), timeout=0.1)
@@ -1072,6 +1090,7 @@ async def test_compaction_provider_timeout_propagates_unchanged() -> None:
         await _generate_compaction_summary(
             model=_ProviderTimeoutModel(id="summary-model", provider="fake"),
             summary_input="Current prompt",
+            summary_prompt=COMPACTION_SUMMARY_PROMPT,
         )
 
 
@@ -1132,6 +1151,7 @@ async def test_rewrite_retries_summary_with_smaller_chunk_after_timeout(tmp_path
             before_tokens=0,
             runs_before=1,
             threshold_tokens=None,
+            summary_prompt=COMPACTION_SUMMARY_PROMPT,
             lifecycle_notice_event_id=None,
             progress_callback=None,
             collect_compaction_hook_messages=False,
@@ -1166,6 +1186,7 @@ async def test_compaction_summary_cancels_model_task_when_outer_call_is_cancelle
         _generate_compaction_summary(
             model=model,
             summary_input="Current prompt",
+            summary_prompt=COMPACTION_SUMMARY_PROMPT,
         ),
     )
 
@@ -1207,6 +1228,7 @@ async def test_compaction_summary_outer_cancellation_returns_without_waiting_for
         _generate_compaction_summary(
             model=model,
             summary_input="Current prompt",
+            summary_prompt=COMPACTION_SUMMARY_PROMPT,
         ),
     )
 
@@ -1247,6 +1269,7 @@ async def test_compaction_summary_outer_cancellation_wins_over_provider_cleanup_
         _generate_compaction_summary(
             model=model,
             summary_input="Current prompt",
+            summary_prompt=COMPACTION_SUMMARY_PROMPT,
         ),
     )
 
@@ -1295,6 +1318,7 @@ async def test_compaction_timeout_cleanup_detaches_after_grace_window() -> None:
         await _generate_compaction_summary(
             model=model,
             summary_input="Current prompt",
+            summary_prompt=COMPACTION_SUMMARY_PROMPT,
         )
 
     await asyncio.wait_for(model.started.wait(), timeout=0.1)
@@ -1588,6 +1612,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
             replay_window_tokens=16_000,
             threshold_tokens=1,
             reserve_tokens=0,
+            summary_prompt=COMPACTION_SUMMARY_PROMPT,
         )
 
     assert outcome is not None
@@ -3549,6 +3574,7 @@ async def test_rewrite_working_session_for_compaction_strips_stale_replay_fields
             before_tokens=0,
             runs_before=2,
             threshold_tokens=None,
+            summary_prompt=COMPACTION_SUMMARY_PROMPT,
             lifecycle_notice_event_id=None,
             progress_callback=None,
             collect_compaction_hook_messages=False,
@@ -3606,6 +3632,7 @@ async def test_rewrite_working_session_for_compaction_ignores_runs_without_stabl
             before_tokens=0,
             runs_before=1,
             threshold_tokens=None,
+            summary_prompt=COMPACTION_SUMMARY_PROMPT,
             lifecycle_notice_event_id=None,
             progress_callback=None,
             collect_compaction_hook_messages=False,
@@ -3700,6 +3727,7 @@ async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path:
             replay_window_tokens=16_000,
             threshold_tokens=1,
             reserve_tokens=0,
+            summary_prompt=COMPACTION_SUMMARY_PROMPT,
         )
 
     assert outcome is not None
@@ -3795,6 +3823,7 @@ async def test_rewrite_working_session_emits_progress_after_persisted_chunks(tmp
             before_tokens=before_tokens,
             runs_before=2,
             threshold_tokens=None,
+            summary_prompt=COMPACTION_SUMMARY_PROMPT,
             lifecycle_notice_event_id="$notice",
             progress_callback=record_progress,
             collect_compaction_hook_messages=False,

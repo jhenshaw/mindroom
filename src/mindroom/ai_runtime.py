@@ -47,15 +47,6 @@ type ModelRunInput = str | Sequence[Message]
 
 _QUEUED_MESSAGE_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
 _QUEUED_MESSAGE_NOTICE_HOOK_ATTR = "_mindroom_queued_message_notice_hook_installed"
-_QUEUED_MESSAGE_NOTICE_TEXT = (
-    "[SYSTEM NOTICE - NEWER USER MESSAGE WAITING] The user posted another message in this thread "
-    "while you were mid-turn. Treat that message as the start of the next turn, not part of this "
-    "one. Finish now with a final text response based on what you have already done — do not "
-    "address the newer message; the next turn will, and may continue, adjust, or redirect this "
-    "work. Do not start new tool calls. Only complete a tool call already in flight this turn if "
-    "stopping would leave broken or unsafe state. Write your final text as a normal response to "
-    "the original request; do not mention this notice or the queued message."
-)
 
 
 def _normalize_run_input(run_input: ModelRunInput) -> list[Message]:
@@ -84,12 +75,16 @@ def attach_media_to_run_input(
     return run_messages
 
 
-def append_inline_media_fallback_to_run_input(run_input: ModelRunInput) -> list[Message]:
+def append_inline_media_fallback_to_run_input(
+    run_input: ModelRunInput,
+    *,
+    fallback_prompt: str,
+) -> list[Message]:
     """Append the inline-media fallback note to the current user turn."""
     run_messages = copy_run_input(run_input)
     current_message = run_messages[-1]
     current_text = current_message.content if isinstance(current_message.content, str) else ""
-    current_message.content = append_inline_media_fallback_prompt(current_text)
+    current_message.content = append_inline_media_fallback_prompt(current_text, fallback_prompt=fallback_prompt)
     current_message.audio = None
     current_message.images = None
     current_message.files = None
@@ -149,6 +144,7 @@ def _append_queued_notice_if_needed(
     *,
     messages: list[Message],
     function_call_results: Sequence[Message],
+    notice_text: str,
 ) -> None:
     _strip_queued_notice_messages(messages)
     if any(message.stop_after_tool_call for message in function_call_results):
@@ -159,7 +155,7 @@ def _append_queued_notice_if_needed(
     messages.append(
         Message(
             role="user",
-            content=_QUEUED_MESSAGE_NOTICE_TEXT,
+            content=notice_text,
             provider_data={_QUEUED_MESSAGE_NOTICE_MARKER_KEY: True},
         ),
     )
@@ -270,7 +266,11 @@ def scrub_queued_notice_session_context(
         )
 
 
-def install_queued_message_notice_hook(model: Model) -> None:
+def install_queued_message_notice_hook(
+    model: Model,
+    *,
+    notice_text: str,
+) -> None:
     """Append a hidden notice after tool results when a newer message is queued."""
     try:
         original_format_function_call_results = model.format_function_call_results
@@ -296,6 +296,7 @@ def install_queued_message_notice_hook(model: Model) -> None:
         _append_queued_notice_if_needed(
             messages=messages,
             function_call_results=function_call_results,
+            notice_text=notice_text,
         )
 
     def _handle_function_call_media_with_notice(
@@ -311,6 +312,7 @@ def install_queued_message_notice_hook(model: Model) -> None:
         _append_queued_notice_if_needed(
             messages=messages,
             function_call_results=function_call_results,
+            notice_text=notice_text,
         )
 
     model_dict["format_function_call_results"] = _format_function_call_results_with_notice

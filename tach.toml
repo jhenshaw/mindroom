@@ -62,7 +62,6 @@ depends_on = [
     "mindroom.agent_knowledge_descriptions",
     "mindroom.agent_descriptions",
     "mindroom.agent_storage",
-    "mindroom.agent_prompts",
     "mindroom.constants",
     "mindroom.credentials",
     "mindroom.custom_tools.delegate",
@@ -71,6 +70,7 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.matrix.identity",
     "mindroom.model_loading",
+    "mindroom.prompt_templates",
     "mindroom.runtime_resolution",
     "mindroom.timing",
     "mindroom.tool_system.catalog",
@@ -134,11 +134,6 @@ visibility = [
     "mindroom.response_runner",
     "mindroom.teams",
 ]
-
-[[modules]]
-path = "mindroom.agent_prompts"
-depends_on = []
-visibility = ["mindroom.agents"]
 
 [[modules]]
 path = "mindroom.ai_runtime"
@@ -971,6 +966,8 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.matrix_identifiers",
     "mindroom.mcp.config",
+    "mindroom.prompt_templates",
+    "mindroom.prompts",
     "mindroom.tool_system.catalog",
     "mindroom.tool_system.plugin_imports",
     "mindroom.tool_system.worker_routing",
@@ -1072,8 +1069,27 @@ visibility = ["mindroom.memory.functions"]
 
 [[modules]]
 path = "mindroom.memory._prompting"
-depends_on = ["mindroom.memory._shared"]
+depends_on = ["mindroom.memory._shared", "mindroom.prompt_templates"]
 visibility = ["mindroom.memory", "mindroom.memory.functions"]
+
+[[modules]]
+path = "mindroom.prompt_templates"
+depends_on = ["mindroom.prompts"]
+visibility = [
+    "mindroom.agents",
+    "mindroom.config.main",
+    "mindroom.memory._prompting",
+]
+
+[[modules]]
+path = "mindroom.prompts"
+depends_on = []
+visibility = [
+    "mindroom.avatar_generation",
+    "mindroom.codex_model",
+    "mindroom.config.main",
+    "mindroom.prompt_templates",
+]
 
 [[modules]]
 path = "mindroom.topic_generator"

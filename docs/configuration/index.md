@@ -495,6 +495,37 @@ Credential-bearing fields such as tokens, cookies, passwords, API keys, and auth
 These artifacts can still contain sensitive non-credential prompt, argument, and result data.
 Leave the flag disabled unless you are actively debugging.
 
+## Built-In Prompt Overrides
+
+MindRoom keeps built-in prompt defaults as uppercase globals in `src/mindroom/prompts.py`.
+Use the optional root `prompts` block to override those defaults without editing Python code.
+Keys must match the uppercase global names exactly, and unknown keys fail config validation.
+
+```yaml
+prompts:
+  HIDDEN_TOOL_CALLS_PROMPT: |
+    Tool calls are hidden from users.
+    Answer directly without narrating internal tool use.
+  ROUTER_AGENT_SELECTION_PROMPT_TEMPLATE: |
+    Decide which agent should respond to this message.
+
+    Available agents and their capabilities:
+
+    {agents_info}
+
+    User message: {message}
+
+    Return only the agent name.
+```
+
+Discover allowed names by inspecting `src/mindroom/prompts.py` or by importing `PROMPT_DEFAULT_NAMES` from `mindroom.prompts`.
+For prompts with `{...}` placeholders, discover the allowed fields from `PROMPT_TEMPLATE_FIELDS` in `mindroom.prompts`.
+MindRoom validates configured prompt placeholders at config load, and unsupported placeholders fail validation before runtime.
+Prompt placeholders are not Jinja and not Python `str.format`; MindRoom only replaces exact `{field_name}` placeholders.
+Only bare placeholder names are supported; compound access, conversions, and format specs such as `{message.text}`, `{message!r}`, or `{message:.2f}` are rejected.
+Escape literal braces as `{{` and `}}` inside prompt overrides that use placeholders.
+Changing root prompt overrides in a running process restarts existing agents, teams, and the router through hot reload.
+
 ## Managed Avatars
 
 MindRoom can generate managed avatars for agents, teams, rooms, and the optional root Matrix Space.
