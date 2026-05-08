@@ -319,10 +319,9 @@ async def test_handle_command_threads_config_path_to_config_commands(tmp_path: P
         config=MagicMock(),
         runtime_paths=resolve_runtime_paths(config_path=config_path, storage_path=tmp_path),
         logger=MagicMock(),
-        derive_conversation_context=AsyncMock(return_value=(False, None, [])),
         conversation_cache=MagicMock(),
         event_cache=make_event_cache_mock(),
-        build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
+        stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
         record_handled_turn=MagicMock(),
         send_response=AsyncMock(return_value=None),
     )
@@ -357,10 +356,9 @@ async def test_handle_command_records_response_event_id_for_standard_reply(tmp_p
         config=MagicMock(),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         logger=MagicMock(),
-        derive_conversation_context=AsyncMock(return_value=(False, None, [])),
         conversation_cache=MagicMock(),
         event_cache=make_event_cache_mock(),
-        build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
+        stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
         record_handled_turn=MagicMock(),
         send_response=AsyncMock(return_value="$reply"),
     )
@@ -407,10 +405,9 @@ async def test_handle_command_reload_plugins_requires_admin_and_uses_callback(tm
         config=SimpleNamespace(authorization=AuthorizationConfig(global_users=["@admin:example.org"])),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         logger=MagicMock(),
-        derive_conversation_context=AsyncMock(return_value=(False, None, [])),
         conversation_cache=MagicMock(),
         event_cache=make_event_cache_mock(),
-        build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
+        stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
         record_handled_turn=MagicMock(),
         send_response=AsyncMock(return_value="$reply"),
         reload_plugins=reload_plugins,
@@ -424,7 +421,7 @@ async def test_handle_command_reload_plugins_requires_admin_and_uses_callback(tm
     )
 
     reload_plugins.assert_awaited_once()
-    assert "demo-plugin" in admin_context.send_response.await_args.args[2]
+    assert "demo-plugin" in admin_context.send_response.await_args.args[0]
 
     user_context = CommandHandlerContext(
         **{**admin_context.__dict__, "config": SimpleNamespace(authorization=AuthorizationConfig(global_users=[]))},
@@ -438,7 +435,7 @@ async def test_handle_command_reload_plugins_requires_admin_and_uses_callback(tm
     )
 
     reload_plugins.assert_awaited_once()
-    assert user_context.send_response.await_args.args[2] == "❌ Admin only."
+    assert user_context.send_response.await_args.args[0] == "❌ Admin only."
 
 
 @pytest.mark.asyncio
@@ -464,10 +461,9 @@ async def test_handle_command_reload_plugins_allows_alias_mapped_admin(tmp_path:
         ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         logger=MagicMock(),
-        derive_conversation_context=AsyncMock(return_value=(False, None, [])),
         conversation_cache=MagicMock(),
         event_cache=make_event_cache_mock(),
-        build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
+        stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
         record_handled_turn=MagicMock(),
         send_response=AsyncMock(return_value="$reply"),
         reload_plugins=reload_plugins,
@@ -482,7 +478,7 @@ async def test_handle_command_reload_plugins_allows_alias_mapped_admin(tmp_path:
     )
 
     reload_plugins.assert_awaited_once()
-    assert context.send_response.await_args.args[2] == "✅ Reloaded 1 plugin; cancelled 0 tasks; active: demo-plugin"
+    assert context.send_response.await_args.args[0] == "✅ Reloaded 1 plugin; cancelled 0 tasks; active: demo-plugin"
 
 
 @pytest.mark.asyncio
@@ -501,10 +497,9 @@ async def test_handle_command_reload_plugins_surfaces_reload_failure(tmp_path: P
         config=SimpleNamespace(authorization=AuthorizationConfig(global_users=["@admin:example.org"])),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         logger=MagicMock(),
-        derive_conversation_context=AsyncMock(return_value=(False, None, [])),
         conversation_cache=MagicMock(),
         event_cache=make_event_cache_mock(),
-        build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
+        stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
         record_handled_turn=MagicMock(),
         send_response=AsyncMock(return_value="$reply"),
         reload_plugins=reload_plugins,
@@ -519,7 +514,7 @@ async def test_handle_command_reload_plugins_surfaces_reload_failure(tmp_path: P
     )
 
     assert (
-        context.send_response.await_args.args[2]
+        context.send_response.await_args.args[0]
         == "❌ Plugin reload failed: Plugin hooks module not found: /tmp/demo/hooks.py"
     )
 
@@ -532,10 +527,9 @@ async def test_handle_command_config_set_confirmation_records_preview_event_id(t
         config=MagicMock(),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         logger=MagicMock(),
-        derive_conversation_context=AsyncMock(return_value=(False, None, [])),
         conversation_cache=MagicMock(),
         event_cache=make_event_cache_mock(),
-        build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
+        stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
         record_handled_turn=MagicMock(),
         send_response=AsyncMock(return_value="$preview"),
     )
@@ -617,10 +611,9 @@ async def test_handle_command_config_set_records_preview_before_post_send_failur
         config=MagicMock(),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         logger=MagicMock(),
-        derive_conversation_context=AsyncMock(return_value=(False, None, [])),
         conversation_cache=MagicMock(),
         event_cache=make_event_cache_mock(),
-        build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$event")),
+        stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
         record_handled_turn=MagicMock(),
         send_response=AsyncMock(return_value="$preview"),
     )

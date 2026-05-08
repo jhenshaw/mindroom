@@ -320,7 +320,7 @@ class ResponseRequest:
     target: MessageTarget | None = None
     matrix_run_metadata: Mapping[str, Any] | None = None
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
-    requires_full_thread_history: bool = False
+    requires_model_history_refresh: bool = False
     prepare_after_lock: Callable[[ResponseRequest], Awaitable[ResponseRequest]] | None = None
     on_lifecycle_lock_acquired: Callable[[], None] | None = None
     pipeline_timing: DispatchPipelineTiming | None = None
@@ -629,6 +629,22 @@ class ResponseRunner:
             locked_operation=locked_operation,
         )
 
+    def _request_with_locked_target(
+        self,
+        request: ResponseRequest,
+        resolved_target: MessageTarget,
+    ) -> ResponseRequest:
+        """Return a prepared request constrained to the target that owns the lock."""
+        response_envelope = request.response_envelope
+        if response_envelope is not None and response_envelope.target != resolved_target:
+            response_envelope = replace(response_envelope, target=resolved_target)
+        return replace(
+            request,
+            thread_id=resolved_target.resolved_thread_id,
+            target=resolved_target,
+            response_envelope=response_envelope,
+        )
+
     def _build_persist_response_event_id_effect(
         self,
         *,
@@ -684,23 +700,22 @@ class ResponseRunner:
             reply_to_event_id=reply_to_event_id,
         )
 
-    async def _refresh_thread_history_after_lock(
+    async def _refresh_model_history_after_lock(
         self,
         request: ResponseRequest,
     ) -> ResponseRequest:
-        """Refresh thread history once this turn owns the lifecycle lock."""
+        """Refresh model-facing thread history once this turn owns the lifecycle lock."""
         if request.thread_id is None:
             return request
 
         try:
             refreshed_history = await self.deps.resolver.fetch_thread_history(
-                self._client(),
                 request.room_id,
                 request.thread_id,
                 caller_label="dispatch_post_lock_refresh",
             )
         except Exception as exc:
-            if request.requires_full_thread_history:
+            if request.requires_model_history_refresh:
                 raise
             self.deps.logger.warning(
                 "Failed to refresh thread history after lock; continuing with existing history",
@@ -709,7 +724,11 @@ class ResponseRunner:
                 error=str(exc),
             )
             return request
-        return replace(request, thread_history=refreshed_history, requires_full_thread_history=False)
+        return replace(
+            request,
+            thread_history=refreshed_history,
+            requires_model_history_refresh=False,
+        )
 
     async def _prepare_request_after_lock(
         self,
@@ -717,7 +736,7 @@ class ResponseRunner:
     ) -> ResponseRequest:
         """Refresh thread history and rebuild any history-derived payload once locked."""
         try:
-            request = await self._refresh_thread_history_after_lock(request)
+            request = await self._refresh_model_history_after_lock(request)
             if request.prepare_after_lock is None:
                 return request
             return await request.prepare_after_lock(request)
@@ -809,6 +828,7 @@ class ResponseRunner:
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
         request = await self._prepare_request_after_lock(request)
+        request = self._request_with_locked_target(request, resolved_target)
         lifecycle = self._build_lifecycle(
             response_kind=response_kind,
             request=request,
@@ -884,6 +904,7 @@ class ResponseRunner:
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
         request = await self._prepare_request_after_lock(request)
+        request = self._request_with_locked_target(request, resolved_target)
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("thread_refresh_ready")
         team_request = replace(team_request, request=request)
@@ -922,8 +943,6 @@ class ResponseRunner:
         include_matrix_prompt_context = any(
             _agent_has_matrix_messaging_tool(self.deps.runtime.config, name) for name in agent_names
         )
-        response_thread_id = resolved_target.resolved_thread_id
-        resolved_target = resolved_target.with_thread_root(response_thread_id)
         model_message = _append_matrix_prompt_context(
             prepared_prompt,
             target=resolved_target,
@@ -2092,8 +2111,6 @@ class ResponseRunner:
         resolved_target: MessageTarget,
     ) -> str | None:
         """Generate one agent response after acquiring the per-thread lock."""
-        delivery_thread_id = resolved_target.resolved_thread_id
-        resolved_target = resolved_target.with_thread_root(delivery_thread_id)
         if not request.prompt.strip():
             return await self._finalize_empty_prompt_locked(
                 request,
@@ -2103,6 +2120,7 @@ class ResponseRunner:
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
         request = await self._prepare_request_after_lock(request)
+        request = self._request_with_locked_target(request, resolved_target)
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("thread_refresh_ready")
         memory_prompt, memory_thread_history, model_prompt_text, model_thread_history = (

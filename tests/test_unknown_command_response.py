@@ -236,12 +236,8 @@ async def test_unknown_command_in_thread(tmp_path: Path) -> None:
     with (
         patch("mindroom.delivery_gateway.send_message_result", mock_send_message),
         patch(
-            "mindroom.matrix.conversation_cache.MatrixConversationCache.get_thread_snapshot",
-            AsyncMock(return_value=thread_history_result([], is_full_history=False)),
-        ),
-        patch(
             "mindroom.matrix.conversation_cache.MatrixConversationCache.get_thread_history",
-            AsyncMock(return_value=[]),
+            AsyncMock(return_value=thread_history_result([], is_full_history=True)),
         ),
         patch(
             "mindroom.matrix.conversation_cache.MatrixConversationCache.get_dispatch_thread_snapshot",
@@ -249,7 +245,7 @@ async def test_unknown_command_in_thread(tmp_path: Path) -> None:
         ),
         patch(
             "mindroom.matrix.conversation_cache.MatrixConversationCache.get_dispatch_thread_history",
-            AsyncMock(return_value=[]),
+            AsyncMock(return_value=thread_history_result([], is_full_history=True)),
         ),
     ):
         await bot._on_message(room, event)

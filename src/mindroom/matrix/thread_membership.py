@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Protocol
 import nio
 
 from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.thread_diagnostics import is_thread_history_source_degraded
 
 if TYPE_CHECKING:
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
@@ -29,13 +30,12 @@ _MAX_THREAD_MEMBERSHIP_HOPS = 512
 
 
 class _SupportsEventId(Protocol):
-    """Minimal protocol for snapshot entries used during thread-root checks."""
+    """Minimal protocol for entries used during thread-root checks."""
 
     event_id: str
 
 
 type _ThreadMessagesLookup = Callable[[str, str], Awaitable[Sequence[_SupportsEventId]]]
-type _ThreadSnapshotLookup = Callable[[str, str], Awaitable[Sequence[_SupportsEventId]]]
 
 
 class _ThreadRootProofState(Enum):
@@ -52,21 +52,26 @@ class ThreadRootProof:
 
     state: _ThreadRootProofState
     error: Exception | None = None
+    thread_history: Sequence[_SupportsEventId] | None = None
 
     @classmethod
-    def proven(cls) -> ThreadRootProof:
+    def proven(cls, thread_history: Sequence[_SupportsEventId] | None = None) -> ThreadRootProof:
         """Return a successful root proof."""
-        return cls(_ThreadRootProofState.PROVEN)
+        return cls(_ThreadRootProofState.PROVEN, thread_history=thread_history)
 
     @classmethod
-    def not_a_thread_root(cls) -> ThreadRootProof:
+    def not_a_thread_root(cls, thread_history: Sequence[_SupportsEventId] | None = None) -> ThreadRootProof:
         """Return a definite non-thread-root result."""
-        return cls(_ThreadRootProofState.NOT_A_THREAD_ROOT)
+        return cls(_ThreadRootProofState.NOT_A_THREAD_ROOT, thread_history=thread_history)
 
     @classmethod
-    def proof_unavailable(cls, error: Exception) -> ThreadRootProof:
+    def proof_unavailable(
+        cls,
+        error: Exception,
+        thread_history: Sequence[_SupportsEventId] | None = None,
+    ) -> ThreadRootProof:
         """Return one failed proof attempt without weakening caller policy."""
-        return cls(_ThreadRootProofState.PROOF_UNAVAILABLE, error=error)
+        return cls(_ThreadRootProofState.PROOF_UNAVAILABLE, error=error, thread_history=thread_history)
 
 
 class ThreadResolutionState(Enum):
@@ -83,31 +88,43 @@ class ThreadResolution:
 
     state: ThreadResolutionState
     thread_id: str | None = None
+    candidate_thread_root_id: str | None = None
     error: Exception | None = None
+    thread_history: Sequence[_SupportsEventId] | None = None
 
     @classmethod
-    def threaded(cls, thread_id: str) -> ThreadResolution:
+    def threaded(
+        cls,
+        thread_id: str,
+        thread_history: Sequence[_SupportsEventId] | None = None,
+    ) -> ThreadResolution:
         """Return one positive thread-membership result."""
-        return cls(ThreadResolutionState.THREADED, thread_id=thread_id)
+        return cls(ThreadResolutionState.THREADED, thread_id=thread_id, thread_history=thread_history)
 
     @classmethod
-    def room_level(cls) -> ThreadResolution:
+    def room_level(cls, thread_history: Sequence[_SupportsEventId] | None = None) -> ThreadResolution:
         """Return one definite room-level result."""
-        return cls(ThreadResolutionState.ROOM_LEVEL)
+        return cls(ThreadResolutionState.ROOM_LEVEL, thread_history=thread_history)
 
     @classmethod
-    def indeterminate(cls, error: Exception) -> ThreadResolution:
+    def indeterminate(
+        cls,
+        error: Exception,
+        candidate_thread_root_id: str | None = None,
+        thread_history: Sequence[_SupportsEventId] | None = None,
+    ) -> ThreadResolution:
         """Return one unresolved result caused by proof failure."""
-        return cls(ThreadResolutionState.INDETERMINATE, error=error)
+        return cls(
+            ThreadResolutionState.INDETERMINATE,
+            candidate_thread_root_id=candidate_thread_root_id,
+            error=error,
+            thread_history=thread_history,
+        )
 
     @property
     def is_threaded(self) -> bool:
         """Return whether the event was proven to belong to a thread."""
         return self.state is ThreadResolutionState.THREADED
-
-
-class _ThreadMembershipProofError(RuntimeError):
-    """Raised when strict thread-membership resolution cannot prove one candidate root."""
 
 
 class ThreadMembershipLookupError(RuntimeError):
@@ -142,23 +159,15 @@ def _resolution_from_root_proof(
 ) -> ThreadResolution:
     """Convert one root proof result into canonical thread membership."""
     if proof.state is _ThreadRootProofState.PROVEN:
-        return ThreadResolution.threaded(thread_root_id)
+        return ThreadResolution.threaded(thread_root_id, thread_history=proof.thread_history)
     if proof.state is _ThreadRootProofState.NOT_A_THREAD_ROOT:
-        return ThreadResolution.room_level()
+        return ThreadResolution.room_level(thread_history=proof.thread_history)
     assert proof.error is not None
-    return ThreadResolution.indeterminate(proof.error)
-
-
-def _strict_thread_id_from_resolution(
-    resolution: ThreadResolution,
-) -> str | None:
-    """Return the strict thread id or raise when proof is unavailable."""
-    if resolution.state is not ThreadResolutionState.INDETERMINATE:
-        return resolution.thread_id
-    msg = "Thread membership proof unavailable"
-    if resolution.error is not None and str(resolution.error):
-        msg = str(resolution.error)
-    raise _ThreadMembershipProofError(msg) from resolution.error
+    return ThreadResolution.indeterminate(
+        proof.error,
+        candidate_thread_root_id=thread_root_id,
+        thread_history=proof.thread_history,
+    )
 
 
 async def resolve_event_thread_membership(
@@ -212,9 +221,15 @@ async def resolve_related_event_thread_membership(
         try:
             related_event_info = await access.fetch_event_info(room_id, current_event_id)
         except Exception as exc:
-            resolution = ThreadResolution.indeterminate(exc)
+            # Keep lookup-failed related events separately scoped for dispatch coalescing and replay checks.
+            resolution = ThreadResolution.indeterminate(exc, candidate_thread_root_id=current_event_id)
             break
         if related_event_info is None:
+            # Missing related events are still possible thread roots; demote later without losing the candidate.
+            resolution = ThreadResolution.indeterminate(
+                ThreadMembershipLookupError(f"Related event {current_event_id} is unavailable"),
+                candidate_thread_root_id=current_event_id,
+            )
             break
 
         thread_id = related_event_info.thread_id or related_event_info.thread_id_from_edit
@@ -238,59 +253,6 @@ async def resolve_related_event_thread_membership(
         break
 
     return resolution
-
-
-async def resolve_event_thread_id(
-    room_id: str,
-    event_info: EventInfo,
-    *,
-    access: ThreadMembershipAccess,
-    event_id: str | None = None,
-    allow_current_root: bool = False,
-) -> str | None:
-    """Return the strict canonical thread membership for one event."""
-    resolution = await resolve_event_thread_membership(
-        room_id,
-        event_info,
-        access=access,
-        event_id=event_id,
-        allow_current_root=allow_current_root,
-    )
-    return _strict_thread_id_from_resolution(resolution)
-
-
-async def _resolve_related_event_thread_id(
-    room_id: str,
-    related_event_id: str,
-    *,
-    access: ThreadMembershipAccess,
-) -> str | None:
-    """Return the strict canonical thread membership for one related target event."""
-    resolution = await resolve_related_event_thread_membership(
-        room_id,
-        related_event_id,
-        access=access,
-    )
-    return _strict_thread_id_from_resolution(resolution)
-
-
-async def resolve_event_thread_id_best_effort(
-    room_id: str,
-    event_info: EventInfo,
-    *,
-    access: ThreadMembershipAccess,
-    event_id: str | None = None,
-    allow_current_root: bool = False,
-) -> str | None:
-    """Return best-effort canonical thread membership for one event."""
-    resolution = await resolve_event_thread_membership(
-        room_id,
-        event_info,
-        access=access,
-        event_id=event_id,
-        allow_current_root=allow_current_root,
-    )
-    return resolution.thread_id
 
 
 async def resolve_related_event_thread_id_best_effort(
@@ -375,21 +337,14 @@ async def _thread_messages_root_proof(
         if _is_thread_root_not_found_error(exc):
             return ThreadRootProof.not_a_thread_root()
         return ThreadRootProof.proof_unavailable(exc)
+    if is_thread_history_source_degraded(thread_messages):
+        msg = "Thread root proof unavailable from degraded thread history"
+        return ThreadRootProof.proof_unavailable(RuntimeError(msg), thread_history=thread_messages)
     has_children = any(message.event_id != thread_root_id for message in thread_messages)
-    return ThreadRootProof.proven() if has_children else ThreadRootProof.not_a_thread_root()
-
-
-async def _snapshot_thread_root_proof(
-    room_id: str,
-    thread_root_id: str,
-    *,
-    fetch_thread_snapshot: _ThreadSnapshotLookup,
-) -> ThreadRootProof:
-    """Return one snapshot-backed root-proof result."""
-    return await _thread_messages_root_proof(
-        room_id,
-        thread_root_id,
-        fetch_thread_messages=fetch_thread_snapshot,
+    return (
+        ThreadRootProof.proven(thread_history=thread_messages)
+        if has_children
+        else ThreadRootProof.not_a_thread_root(thread_history=thread_messages)
     )
 
 
@@ -450,20 +405,6 @@ def thread_messages_thread_membership_access(
         lookup_thread_id=lookup_thread_id,
         fetch_event_info=fetch_event_info,
         prove_thread_root=prove_thread_root,
-    )
-
-
-def _snapshot_thread_membership_access(
-    *,
-    lookup_thread_id: _ThreadIdLookup,
-    fetch_event_info: _EventInfoLookup,
-    fetch_thread_snapshot: _ThreadSnapshotLookup,
-) -> ThreadMembershipAccess:
-    """Build shared membership access backed by authoritative thread snapshots."""
-    return thread_messages_thread_membership_access(
-        lookup_thread_id=lookup_thread_id,
-        fetch_event_info=fetch_event_info,
-        fetch_thread_messages=fetch_thread_snapshot,
     )
 
 

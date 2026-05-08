@@ -13,14 +13,6 @@ if TYPE_CHECKING:
 
 type _ThreadHistoryDiagnosticValue = str | int | float | bool
 
-THREAD_HISTORY_SOURCE_DIAGNOSTIC = "thread_read_source"
-THREAD_HISTORY_SOURCE_CACHE = "cache"
-THREAD_HISTORY_SOURCE_HOMESERVER = "homeserver"
-THREAD_HISTORY_SOURCE_STALE_CACHE = "stale_cache"
-THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC = "cache_reject_reason"
-THREAD_HISTORY_ERROR_DIAGNOSTIC = "thread_read_error"
-THREAD_HISTORY_DEGRADED_DIAGNOSTIC = "thread_read_degraded"
-
 
 @dataclass(slots=True, eq=False)
 class ThreadHistoryResult(Sequence["ResolvedVisibleMessage"]):  # noqa: PLW1641

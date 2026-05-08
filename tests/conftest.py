@@ -24,6 +24,7 @@ import mindroom.bot  # noqa: F401
 from mindroom.bot import AgentBot, TeamBot
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.conversation_resolver import DispatchContextResult, MessageContext
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, FinalDeliveryRequest, SendTextRequest
 from mindroom.edit_regenerator import EditRegenerator
 from mindroom.final_delivery import FinalDeliveryOutcome
@@ -34,10 +35,11 @@ from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_cache import ConversationCacheProtocol
+from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.runtime_support import StartupThreadPrewarmRegistry
-from mindroom.turn_controller import TurnController
-from mindroom.turn_policy import TurnPolicy
+from mindroom.turn_controller import TurnController, _DispatchPreparation, _ReplayGuardContext
+from mindroom.turn_policy import PreparedDispatch, TurnPolicy
 from mindroom.turn_store import TurnStore
 
 if TYPE_CHECKING:
@@ -54,6 +56,7 @@ __all__ = [
     "create_mock_room",
     "delivered_matrix_event",
     "delivered_matrix_side_effect",
+    "dispatch_context_result",
     "drain_coalescing",
     "event_cache",
     "event_cache_factory",
@@ -70,6 +73,7 @@ __all__ = [
     "orchestrator_runtime_paths",
     "patch_response_runner_module",
     "postgres_event_cache_url",
+    "prepared_dispatch_result",
     "replace_delivery_gateway_deps",
     "replace_edit_regenerator_deps",
     "replace_response_runner_deps",
@@ -91,6 +95,23 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 _SOFT_WRAP_RE = re.compile(r"(?<=\S)\n(?=\S)")
 RuntimeBot = AgentBot | TeamBot
 TestFunction = Callable[..., object]
+
+
+def dispatch_context_result(context: MessageContext) -> DispatchContextResult:
+    """Wrap a stable message context in the dispatch extraction result shape."""
+    return DispatchContextResult(context=context, thread_context=None)
+
+
+def prepared_dispatch_result(dispatch: PreparedDispatch) -> _DispatchPreparation:
+    """Wrap a prepared dispatch in the private turn-controller preparation result shape."""
+    return _DispatchPreparation(
+        dispatch=dispatch,
+        replay_guard=_ReplayGuardContext(
+            history=dispatch.context.replay_guard_history,
+            degraded=is_thread_history_degraded(dispatch.context.replay_guard_history),
+            thread_id=dispatch.target.resolved_thread_id,
+        ),
+    )
 
 
 def requires_linux(
@@ -392,6 +413,7 @@ def make_event_cache_mock() -> AsyncMock:
     event_cache.get_event.return_value = None
     event_cache.get_latest_edit.return_value = None
     event_cache.get_mxc_text.return_value = None
+    event_cache.get_recent_room_events.return_value = []
     event_cache.get_recent_room_thread_ids.return_value = []
     event_cache.get_thread_events.return_value = None
     event_cache.get_thread_cache_state.return_value = None
@@ -411,33 +433,19 @@ def make_conversation_cache_mock() -> AsyncMock:
     conversation_cache.get_event = AsyncMock(
         side_effect=lambda _room_id, event_id: _make_room_get_event_response(event_id),
     )
-    conversation_cache.get_thread_snapshot = AsyncMock(
-        return_value=thread_history_result([], is_full_history=False),
+    conversation_cache.get_thread_history = AsyncMock(
+        return_value=thread_history_result([], is_full_history=True),
     )
-    conversation_cache.get_thread_history = AsyncMock(return_value=[])
     conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
         return_value=thread_history_result([], is_full_history=False),
     )
-    conversation_cache.get_dispatch_thread_history = AsyncMock(return_value=[])
+    conversation_cache.get_dispatch_thread_history = AsyncMock(
+        return_value=thread_history_result([], is_full_history=True),
+    )
+    conversation_cache.get_strict_thread_history = AsyncMock(
+        return_value=thread_history_result([], is_full_history=True),
+    )
 
-    async def _get_thread_messages(
-        room_id: str,
-        thread_id: str,
-        *,
-        full_history: bool,
-        dispatch_safe: bool,
-        caller_label: str = "unknown",
-    ) -> object:
-        _ = caller_label
-        if dispatch_safe:
-            if full_history:
-                return await conversation_cache.get_dispatch_thread_history(room_id, thread_id)
-            return await conversation_cache.get_dispatch_thread_snapshot(room_id, thread_id)
-        if full_history:
-            return await conversation_cache.get_thread_history(room_id, thread_id)
-        return await conversation_cache.get_thread_snapshot(room_id, thread_id)
-
-    conversation_cache.get_thread_messages = AsyncMock(side_effect=_get_thread_messages)
     conversation_cache.get_thread_id_for_event = AsyncMock(return_value=None)
     conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value=None)
     conversation_cache.append_live_event = AsyncMock()

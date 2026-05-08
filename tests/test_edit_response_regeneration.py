@@ -565,11 +565,7 @@ async def test_bot_edit_regeneration_does_not_rerun_response_gating_after_hydrat
     )
     replace_edit_regenerator_deps(bot)
     bot.logger = MagicMock()
-    bot._conversation_resolver.derive_conversation_context = AsyncMock(return_value=(False, None, []))
-    bot._conversation_cache.get_thread_history = AsyncMock(return_value=[])
-    bot._conversation_cache.get_thread_snapshot = AsyncMock(
-        return_value=thread_history_result([], is_full_history=False),
-    )
+    bot._conversation_cache.get_thread_history = AsyncMock(return_value=thread_history_result([], is_full_history=True))
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
     _record_handled_turn(bot._turn_store, ["$original:example.com"], response_event_id="$response:example.com")
@@ -702,7 +698,7 @@ async def test_handle_message_edit_reuses_persisted_target_and_thread_scope(
             bot._conversation_resolver,
             "fetch_thread_history",
             new_callable=AsyncMock,
-            return_value=[],
+            return_value=thread_history_result([], is_full_history=True),
         ) as mock_fetch_history,
         patch.object(
             bot._turn_store,
@@ -733,7 +729,6 @@ async def test_handle_message_edit_reuses_persisted_target_and_thread_scope(
         )
 
     mock_fetch_history.assert_awaited_once_with(
-        bot.client,
         room.room_id,
         stored_target.resolved_thread_id,
         caller_label="edit_regeneration_context",
@@ -1800,7 +1795,11 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_from_persisted_run_
 
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
-        patch.object(bot._conversation_resolver, "fetch_thread_history", new=AsyncMock(return_value=[])),
+        patch.object(
+            bot._conversation_resolver,
+            "fetch_thread_history",
+            new=AsyncMock(return_value=thread_history_result([], is_full_history=True)),
+        ),
         patch.object(
             bot._conversation_state_writer,
             "create_storage",
@@ -2106,7 +2105,7 @@ async def test_handle_message_edit_uses_persisted_interrupted_response_event_id_
             thread_history=[],
             mentioned_agents=[],
             has_non_agent_mentions=False,
-            requires_full_thread_history=False,
+            requires_model_history_refresh=False,
         )
 
         await bot._edit_regenerator.handle_message_edit(
@@ -2232,7 +2231,7 @@ async def test_handle_message_edit_uses_persisted_interrupted_response_event_id_
             thread_history=[],
             mentioned_agents=[],
             has_non_agent_mentions=False,
-            requires_full_thread_history=False,
+            requires_model_history_refresh=False,
         )
 
         await bot._edit_regenerator.handle_message_edit(
@@ -2379,7 +2378,7 @@ async def test_team_handle_message_edit_uses_persisted_interrupted_response_even
             thread_history=[],
             mentioned_agents=[MatrixID.from_agent("test_team", "example.com", runtime_paths)],
             has_non_agent_mentions=False,
-            requires_full_thread_history=False,
+            requires_model_history_refresh=False,
         )
 
         await bot._edit_regenerator.handle_message_edit(
@@ -2503,7 +2502,7 @@ async def test_edit_regenerator_preserves_interactive_selection_run_metadata(tmp
             thread_history=[],
             mentioned_agents=[],
             has_non_agent_mentions=False,
-            requires_full_thread_history=False,
+            requires_model_history_refresh=False,
         )
 
         await bot._edit_regenerator.handle_message_edit(
@@ -2630,7 +2629,7 @@ async def test_edit_regenerator_backfill_preserves_interactive_selection_anchor_
             thread_history=[],
             mentioned_agents=[],
             has_non_agent_mentions=False,
-            requires_full_thread_history=False,
+            requires_model_history_refresh=False,
         )
 
         await bot._edit_regenerator.handle_message_edit(
@@ -3641,7 +3640,7 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
         )
         mock_send_text.return_value = "$ack_event:example.com"
         mock_generate_response.return_value = _delivery_resolution("$response_event:example.com")
-        mock_fetch_history.return_value = []
+        mock_fetch_history.return_value = thread_history_result([], is_full_history=True)
 
         # Process the reaction event
         await bot._on_reaction(room, reaction_event)
@@ -3728,7 +3727,7 @@ async def test_on_reaction_leaves_question_retryable_when_ack_response_is_suppre
         )
         mock_send_text.return_value = "$ack_event:example.com"
         mock_generate_response.return_value = _delivery_resolution(None)
-        mock_fetch_history.return_value = []
+        mock_fetch_history.return_value = thread_history_result([], is_full_history=True)
 
         await bot._on_reaction(room, reaction_event)
 
@@ -3823,7 +3822,12 @@ async def test_on_message_routes_interactive_text_selection_through_turn_control
             new_callable=AsyncMock,
             return_value=_delivery_resolution("$response:example.com"),
         ) as mock_generate_response,
-        patch.object(bot._conversation_resolver, "fetch_thread_history", new_callable=AsyncMock, return_value=[]),
+        patch.object(
+            bot._conversation_resolver,
+            "fetch_thread_history",
+            new_callable=AsyncMock,
+            return_value=thread_history_result([], is_full_history=True),
+        ),
         patch.object(bot._turn_controller, "_dispatch_text_message", new_callable=AsyncMock) as mock_dispatch_text,
     ):
         await bot._on_message(room, message_event)
@@ -4120,11 +4124,12 @@ async def test_on_media_message_tracks_relay_event_id(tmp_path: Path) -> None:
         patch("mindroom.turn_controller.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         # Setup mocks
-        bot._conversation_cache.get_thread_history = AsyncMock(return_value=[])
-        bot._conversation_cache.get_thread_snapshot = AsyncMock(
-            return_value=thread_history_result([], is_full_history=False),
+        bot._conversation_cache.get_thread_history = AsyncMock(
+            return_value=thread_history_result([], is_full_history=True),
         )
-        bot._conversation_cache.get_dispatch_thread_history = AsyncMock(return_value=[])
+        bot._conversation_cache.get_dispatch_thread_history = AsyncMock(
+            return_value=thread_history_result([], is_full_history=True),
+        )
         bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
             return_value=thread_history_result([], is_full_history=False),
         )
@@ -4235,11 +4240,12 @@ async def test_on_media_message_no_transcription_still_marks_relayed(tmp_path: P
         patch("mindroom.turn_controller.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         # Setup mocks
-        bot._conversation_cache.get_thread_history = AsyncMock(return_value=[])
-        bot._conversation_cache.get_thread_snapshot = AsyncMock(
-            return_value=thread_history_result([], is_full_history=False),
+        bot._conversation_cache.get_thread_history = AsyncMock(
+            return_value=thread_history_result([], is_full_history=True),
         )
-        bot._conversation_cache.get_dispatch_thread_history = AsyncMock(return_value=[])
+        bot._conversation_cache.get_dispatch_thread_history = AsyncMock(
+            return_value=thread_history_result([], is_full_history=True),
+        )
         bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
             return_value=thread_history_result([], is_full_history=False),
         )

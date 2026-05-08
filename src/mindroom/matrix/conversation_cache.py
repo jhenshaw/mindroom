@@ -19,24 +19,24 @@ from mindroom.matrix.cache import (
     normalize_nio_event_for_cache,
     thread_history_result,
 )
-from mindroom.matrix.cache.thread_reads import ThreadReadPolicy
+from mindroom.matrix.cache.thread_reads import ThreadReadMode, ThreadReadPolicy
 from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
 from mindroom.matrix.cache.thread_writes import ThreadLiveWritePolicy, ThreadOutboundWritePolicy, ThreadSyncWritePolicy
 from mindroom.matrix.client_thread_history import (
     fetch_dispatch_thread_history,
     fetch_dispatch_thread_snapshot,
     fetch_thread_history,
-    fetch_thread_snapshot,
     get_room_threads_page,
 )
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import active_internal_sender_ids
 from mindroom.matrix.message_content import extract_edit_body
 from mindroom.matrix.thread_bookkeeping import ThreadMutationResolver
+from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.matrix.thread_membership import (
     fetch_event_info_for_client,
     lookup_thread_id_from_conversation_cache,
-    resolve_event_thread_id,
+    resolve_event_thread_membership,
 )
 from mindroom.matrix.thread_room_scan import room_scan_membership_access_for_client
 from mindroom.timing import elapsed_ms_since
@@ -53,7 +53,7 @@ if TYPE_CHECKING:
 
 type ThreadReadResult = ThreadHistoryResult
 type EventLookupResult = nio.RoomGetEventResponse | RoomGetEventError
-type _ThreadReadCacheKey = tuple[str, str, bool, bool]
+type _ThreadReadCacheKey = tuple[str, str, ThreadReadMode]
 
 logger = get_logger(__name__)
 
@@ -107,7 +107,7 @@ async def resolve_thread_root_event_id_for_client(
             normalized_event_id,
         )
 
-    return await resolve_event_thread_id(
+    resolution = await resolve_event_thread_membership(
         room_id,
         event_info,
         event_id=normalized_event_id,
@@ -123,6 +123,7 @@ async def resolve_thread_root_event_id_for_client(
             ),
         ),
     )
+    return resolution.thread_id
 
 
 class ConversationCacheProtocol(Protocol):
@@ -133,26 +134,6 @@ class ConversationCacheProtocol(Protocol):
 
     async def get_event(self, room_id: str, event_id: str) -> EventLookupResult:
         """Resolve one Matrix event by ID."""
-
-    async def get_thread_messages(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        full_history: bool,
-        dispatch_safe: bool,
-        caller_label: str = "unknown",
-    ) -> ThreadReadResult:
-        """Resolve thread context using explicit history and dispatch-safety flags."""
-
-    async def get_thread_snapshot(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        caller_label: str = "unknown",
-    ) -> ThreadReadResult:
-        """Resolve advisory thread context for non-dispatch callers."""
 
     async def get_thread_history(
         self,
@@ -180,6 +161,15 @@ class ConversationCacheProtocol(Protocol):
         caller_label: str = "unknown",
     ) -> ThreadReadResult:
         """Resolve strict full dispatch thread history using only fresh cache data or a homeserver refill."""
+
+    async def get_strict_thread_history(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        caller_label: str = "unknown",
+    ) -> ThreadReadResult:
+        """Resolve strict full thread history without live dispatch timeouts or stale fallback."""
 
     async def get_thread_id_for_event(self, room_id: str, event_id: str) -> str | None:
         """Resolve the cached thread root for one event when known."""
@@ -376,7 +366,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
             logger_getter=lambda: self.logger,
             runtime=self.runtime,
             fetch_thread_history_from_client=self._fetch_thread_history_from_client,
-            fetch_thread_snapshot_from_client=self._fetch_thread_snapshot_from_client,
             fetch_dispatch_thread_history_from_client=self._fetch_dispatch_thread_history_from_client,
             fetch_dispatch_thread_snapshot_from_client=self._fetch_dispatch_thread_snapshot_from_client,
         )
@@ -443,17 +432,27 @@ class MatrixConversationCache(ConversationCacheProtocol):
             diagnostics=result.diagnostics,
         )
 
+    @staticmethod
+    def _thread_read_result_is_memoizable(
+        result: ThreadReadResult,
+        *,
+        mode: ThreadReadMode,
+    ) -> bool:
+        """Return whether one read is complete enough to reuse later in this turn."""
+        if is_thread_history_degraded(result):
+            return False
+        return not mode.full_history or result.is_full_history
+
     async def _read_thread_memoized(
         self,
         room_id: str,
         thread_id: str,
         *,
-        full_history: bool,
-        dispatch_safe: bool,
+        mode: ThreadReadMode,
         caller_label: str,
     ) -> ThreadReadResult:
         """Resolve one thread read through per-turn memoization."""
-        cache_key: _ThreadReadCacheKey = (room_id, thread_id, full_history, dispatch_safe)
+        cache_key: _ThreadReadCacheKey = (room_id, thread_id, mode)
         turn_cache = self._turn_thread_read_cache.get()
         if turn_cache is not None and cache_key in turn_cache:
             return self._copy_thread_read_result(turn_cache[cache_key])
@@ -461,11 +460,10 @@ class MatrixConversationCache(ConversationCacheProtocol):
         result = await self._reads.read_thread(
             room_id,
             thread_id,
-            full_history=full_history,
-            dispatch_safe=dispatch_safe,
+            mode=mode,
             caller_label=caller_label,
         )
-        if turn_cache is not None:
+        if turn_cache is not None and self._thread_read_result_is_memoizable(result, mode=mode):
             turn_cache[cache_key] = self._copy_thread_read_result(result)
             return self._copy_thread_read_result(turn_cache[cache_key])
         return result
@@ -574,22 +572,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
     ) -> ThreadHistoryResult:
         return await self._fetch_thread_from_client(
             fetch_thread_history,
-            room_id,
-            thread_id,
-            caller_label=caller_label,
-            coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-        )
-
-    async def _fetch_thread_snapshot_from_client(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        caller_label: str,
-        coordinator_queue_wait_ms: float,
-    ) -> ThreadHistoryResult:
-        return await self._fetch_thread_from_client(
-            fetch_thread_snapshot,
             room_id,
             thread_id,
             caller_label=caller_label,
@@ -793,22 +775,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
         await asyncio.sleep(0)
         return "warmed"
 
-    async def get_thread_snapshot(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        caller_label: str = "unknown",
-    ) -> ThreadReadResult:
-        """Resolve advisory thread context for non-dispatch callers."""
-        return await self._read_thread_memoized(
-            room_id,
-            thread_id,
-            full_history=False,
-            dispatch_safe=False,
-            caller_label=caller_label,
-        )
-
     async def get_thread_history(
         self,
         room_id: str,
@@ -820,40 +786,9 @@ class MatrixConversationCache(ConversationCacheProtocol):
         return await self._read_thread_memoized(
             room_id,
             thread_id,
-            full_history=True,
-            dispatch_safe=False,
+            mode=ThreadReadMode.ADVISORY_FULL,
             caller_label=caller_label,
         )
-
-    async def get_thread_messages(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        full_history: bool,
-        dispatch_safe: bool,
-        caller_label: str = "unknown",
-    ) -> ThreadReadResult:
-        """Resolve thread context using one explicit read-mode entrypoint."""
-        if dispatch_safe:
-            if full_history:
-                return await self.get_dispatch_thread_history(
-                    room_id,
-                    thread_id,
-                    caller_label=caller_label,
-                )
-            return await self.get_dispatch_thread_snapshot(
-                room_id,
-                thread_id,
-                caller_label=caller_label,
-            )
-        if full_history:
-            return await self.get_thread_history(
-                room_id,
-                thread_id,
-                caller_label=caller_label,
-            )
-        return await self.get_thread_snapshot(room_id, thread_id, caller_label=caller_label)
 
     async def get_dispatch_thread_snapshot(
         self,
@@ -866,8 +801,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         return await self._read_thread_memoized(
             room_id,
             thread_id,
-            full_history=False,
-            dispatch_safe=True,
+            mode=ThreadReadMode.DISPATCH_SNAPSHOT,
             caller_label=caller_label,
         )
 
@@ -882,8 +816,22 @@ class MatrixConversationCache(ConversationCacheProtocol):
         return await self._read_thread_memoized(
             room_id,
             thread_id,
-            full_history=True,
-            dispatch_safe=True,
+            mode=ThreadReadMode.DISPATCH_FULL,
+            caller_label=caller_label,
+        )
+
+    async def get_strict_thread_history(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        caller_label: str = "unknown",
+    ) -> ThreadReadResult:
+        """Resolve strict full thread history without live dispatch timeouts or stale fallback."""
+        return await self._read_thread_memoized(
+            room_id,
+            thread_id,
+            mode=ThreadReadMode.STRICT_FULL,
             caller_label=caller_label,
         )
 

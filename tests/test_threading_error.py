@@ -13,7 +13,6 @@ import json
 import tempfile
 import time
 from contextlib import nullcontext
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
@@ -38,14 +37,8 @@ from mindroom.matrix import thread_bookkeeping
 from mindroom.matrix.cache import ThreadHistoryResult, thread_writes
 from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError, ThreadCacheState
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
-from mindroom.matrix.cache.thread_history_result import (
-    THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC,
-    THREAD_HISTORY_SOURCE_CACHE,
-    THREAD_HISTORY_SOURCE_DIAGNOSTIC,
-    THREAD_HISTORY_SOURCE_HOMESERVER,
-    THREAD_HISTORY_SOURCE_STALE_CACHE,
-)
 from mindroom.matrix.cache.thread_history_result import thread_history_result as _thread_history_result_impl
+from mindroom.matrix.cache.thread_reads import ThreadReadMode
 from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
 from mindroom.matrix.cache.thread_writes import (
     _apply_thread_message_mutation,
@@ -60,23 +53,38 @@ from mindroom.matrix.message_content import _clear_mxc_cache
 from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncCheckpoint
 from mindroom.matrix.sync_tokens import _load_sync_token, load_sync_token_record, save_sync_token
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact
+from mindroom.matrix.thread_diagnostics import (
+    THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC,
+    THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
+    THREAD_HISTORY_ERROR_DIAGNOSTIC,
+    THREAD_HISTORY_SOURCE_CACHE,
+    THREAD_HISTORY_SOURCE_DEGRADED,
+    THREAD_HISTORY_SOURCE_DIAGNOSTIC,
+    THREAD_HISTORY_SOURCE_HOMESERVER,
+    THREAD_HISTORY_SOURCE_STALE_CACHE,
+    is_thread_history_degraded,
+)
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
+    ThreadResolution,
+    ThreadResolutionState,
     ThreadRootProof,
-    _resolve_related_event_thread_id,
-    _snapshot_thread_membership_access,
-    resolve_event_thread_id,
+    resolve_event_thread_membership,
     resolve_related_event_thread_id_best_effort,
+    resolve_related_event_thread_membership,
     room_scan_thread_membership_access,
+    thread_messages_thread_membership_access,
 )
 from mindroom.matrix.thread_projection import resolve_thread_ids_for_event_infos
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.response_runner import ResponseRequest
 from mindroom.runtime_support import (
     OwnedRuntimeSupport,
     StartupThreadPrewarmRegistry,
     close_owned_runtime_support,
     sync_owned_runtime_support,
 )
+from mindroom.turn_policy import _DispatchPlan
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -1367,7 +1375,7 @@ class TestMatrixConversationCacheThreadReads:
         with patch.object(
             access._reads,
             "read_thread",
-            new=AsyncMock(return_value=expected_history),
+            new=AsyncMock(return_value=thread_history_result(expected_history, is_full_history=True)),
         ) as mock_read_thread:
             async with access.turn_scope():
                 first_history = await access.get_dispatch_thread_history("!test:localhost", "$thread_root")
@@ -1379,10 +1387,81 @@ class TestMatrixConversationCacheThreadReads:
         mock_read_thread.assert_awaited_once_with(
             "!test:localhost",
             "$thread_root",
-            full_history=True,
-            dispatch_safe=True,
+            mode=ThreadReadMode.DISPATCH_FULL,
             caller_label="unknown",
         )
+
+    @pytest.mark.asyncio
+    async def test_turn_scope_does_not_memoize_degraded_full_thread_history_reads(self) -> None:
+        """A degraded full-history read should not block a later retry in the same turn."""
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(client=_make_client_mock(), event_cache=_runtime_event_cache()),
+        )
+        degraded_history = thread_history_result(
+            [],
+            is_full_history=False,
+            diagnostics={
+                THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
+                THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
+                THREAD_HISTORY_ERROR_DIAGNOSTIC: "cache_coordinator_timeout",
+            },
+        )
+        full_history = thread_history_result(
+            [_message(event_id="$thread_root", body="Root")],
+            is_full_history=True,
+            diagnostics={THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_CACHE},
+        )
+
+        with patch.object(
+            access._reads,
+            "read_thread",
+            new=AsyncMock(side_effect=[degraded_history, full_history]),
+        ) as mock_read_thread:
+            async with access.turn_scope():
+                first_history = await access.get_dispatch_thread_history("!test:localhost", "$thread_root")
+                second_history = await access.get_dispatch_thread_history("!test:localhost", "$thread_root")
+
+        assert first_history.is_full_history is False
+        assert second_history.is_full_history is True
+        assert [message.event_id for message in second_history] == ["$thread_root"]
+        assert mock_read_thread.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_turn_scope_does_not_memoize_degraded_snapshot_thread_reads(self) -> None:
+        """A degraded dispatch snapshot should not block a later retry in the same turn."""
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(client=_make_client_mock(), event_cache=_runtime_event_cache()),
+        )
+        degraded_snapshot = thread_history_result(
+            [],
+            is_full_history=False,
+            diagnostics={
+                THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
+                THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
+                THREAD_HISTORY_ERROR_DIAGNOSTIC: "cache_coordinator_timeout",
+            },
+        )
+        recovered_snapshot = thread_history_result(
+            [_message(event_id="$thread_root", body="Root")],
+            is_full_history=False,
+            diagnostics={THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_CACHE},
+        )
+
+        with patch.object(
+            access._reads,
+            "read_thread",
+            new=AsyncMock(side_effect=[degraded_snapshot, recovered_snapshot]),
+        ) as mock_read_thread:
+            async with access.turn_scope():
+                first_history = await access.get_dispatch_thread_snapshot("!test:localhost", "$thread_root")
+                second_history = await access.get_dispatch_thread_snapshot("!test:localhost", "$thread_root")
+
+        assert first_history.diagnostics[THREAD_HISTORY_DEGRADED_DIAGNOSTIC] is True
+        assert second_history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_CACHE
+        assert [message.event_id for message in second_history] == ["$thread_root"]
+        assert mock_read_thread.await_count == 2
 
     def test_collect_sync_timeline_cache_updates_treats_reference_as_thread_candidate(self) -> None:
         """Sync bookkeeping should classify references alongside other thread-affecting relations."""
@@ -1443,12 +1522,11 @@ class TestMatrixConversationCacheThreadReads:
         )
 
         assert latest_event_id == "$thread-root:localhost"
-        access._reads.fetch_thread_history_from_client.assert_awaited_once_with(
-            "!room:localhost",
-            "$thread-root:localhost",
-            caller_label="latest_thread_event_lookup",
-            coordinator_queue_wait_ms=0.0,
-        )
+        access._reads.fetch_thread_history_from_client.assert_awaited_once()
+        fetch_args = access._reads.fetch_thread_history_from_client.await_args
+        assert fetch_args.args == ("!room:localhost", "$thread-root:localhost")
+        assert fetch_args.kwargs["caller_label"] == "latest_thread_event_lookup"
+        assert fetch_args.kwargs["coordinator_queue_wait_ms"] >= 0.0
 
     @pytest.mark.asyncio
     async def test_invalidate_known_thread_fails_closed_when_stale_marker_write_fails(self) -> None:
@@ -3373,7 +3451,7 @@ class TestThreadingBehavior:
             await allow_resolve.wait()
             return MutationThreadImpact.threaded("$mutated-thread:localhost")
 
-        async def quick_snapshot(
+        async def quick_history(
             _room_id: str,
             _thread_id: str,
             **_kwargs: object,
@@ -3385,7 +3463,7 @@ class TestThreadingBehavior:
             )
 
         access._live._resolver.resolve_thread_impact_for_mutation = AsyncMock(side_effect=slow_resolve)
-        access._reads.fetch_thread_snapshot_from_client = AsyncMock(side_effect=quick_snapshot)
+        access._reads.fetch_thread_history_from_client = AsyncMock(side_effect=quick_history)
 
         edit_event = nio.RoomMessageText.from_dict(
             {
@@ -3412,7 +3490,7 @@ class TestThreadingBehavior:
         )
         await asyncio.wait_for(resolve_started.wait(), timeout=1.0)
 
-        read_task = asyncio.create_task(access.get_thread_snapshot("!test:localhost", "$other-thread:localhost"))
+        read_task = asyncio.create_task(access.get_thread_history("!test:localhost", "$other-thread:localhost"))
         await asyncio.wait_for(read_finished.wait(), timeout=1.0)
         await asyncio.wait_for(asyncio.shield(read_task), timeout=0.1)
 
@@ -3442,7 +3520,7 @@ class TestThreadingBehavior:
             await allow_resolve.wait()
             return MutationThreadImpact.room_level()
 
-        async def quick_snapshot(
+        async def quick_history(
             _room_id: str,
             _thread_id: str,
             **_kwargs: object,
@@ -3454,7 +3532,7 @@ class TestThreadingBehavior:
             )
 
         access._live._resolver.resolve_redaction_thread_impact = AsyncMock(side_effect=slow_resolve)
-        access._reads.fetch_thread_snapshot_from_client = AsyncMock(side_effect=quick_snapshot)
+        access._reads.fetch_thread_history_from_client = AsyncMock(side_effect=quick_history)
         event_cache.redact_event = AsyncMock(return_value=True)
 
         redaction_event = MagicMock(spec=nio.RedactionEvent)
@@ -3473,7 +3551,7 @@ class TestThreadingBehavior:
         live_task = asyncio.create_task(access.apply_redaction("!test:localhost", redaction_event))
         await asyncio.wait_for(resolve_started.wait(), timeout=1.0)
 
-        read_task = asyncio.create_task(access.get_thread_snapshot("!test:localhost", "$other-thread:localhost"))
+        read_task = asyncio.create_task(access.get_thread_history("!test:localhost", "$other-thread:localhost"))
         await asyncio.wait_for(read_finished.wait(), timeout=1.0)
         await asyncio.wait_for(asyncio.shield(read_task), timeout=0.1)
 
@@ -4085,7 +4163,7 @@ class TestThreadingBehavior:
         async def prove_thread_root(_room_id: str, _thread_root_id: str) -> ThreadRootProof:
             return ThreadRootProof.not_a_thread_root()
 
-        resolved_thread_id = await resolve_event_thread_id(
+        resolution = await resolve_event_thread_membership(
             room_id,
             event_infos[last_event_id],
             access=ThreadMembershipAccess(
@@ -4095,7 +4173,8 @@ class TestThreadingBehavior:
             ),
         )
 
-        assert resolved_thread_id == thread_root_id
+        assert resolution.state is ThreadResolutionState.THREADED
+        assert resolution.thread_id == thread_root_id
 
     @pytest.mark.asyncio
     async def test_resolve_thread_ids_for_event_infos_reaches_fixpoint_across_transitive_chain(
@@ -4172,7 +4251,7 @@ class TestThreadingBehavior:
         }
 
     @pytest.mark.asyncio
-    async def test_resolve_event_thread_id_follows_reaction_target_transitively(
+    async def test_resolve_event_thread_membership_follows_reaction_target_transitively(
         self,
     ) -> None:
         """The shared entrypoint should inherit thread membership across reaction targets too."""
@@ -4239,7 +4318,7 @@ class TestThreadingBehavior:
         async def prove_thread_root(_room_id: str, _thread_root_id: str) -> ThreadRootProof:
             return ThreadRootProof.not_a_thread_root()
 
-        resolved_thread_id = await resolve_event_thread_id(
+        resolution = await resolve_event_thread_membership(
             room_id,
             reaction_event,
             access=ThreadMembershipAccess(
@@ -4249,7 +4328,8 @@ class TestThreadingBehavior:
             ),
         )
 
-        assert resolved_thread_id == thread_root_id
+        assert resolution.state is ThreadResolutionState.THREADED
+        assert resolution.thread_id == thread_root_id
 
     @pytest.mark.asyncio
     async def test_room_scan_thread_membership_access_treats_root_with_children_as_threaded(
@@ -4289,7 +4369,7 @@ class TestThreadingBehavior:
                 {"event_id": "$child:localhost"},
             ], True
 
-        resolved_thread_id = await _resolve_related_event_thread_id(
+        resolution = await resolve_related_event_thread_membership(
             room_id,
             thread_root_id,
             access=room_scan_thread_membership_access(
@@ -4299,7 +4379,8 @@ class TestThreadingBehavior:
             ),
         )
 
-        assert resolved_thread_id == thread_root_id
+        assert resolution.state is ThreadResolutionState.THREADED
+        assert resolution.thread_id == thread_root_id
 
     @pytest.mark.asyncio
     async def test_room_scan_thread_membership_access_does_not_treat_root_edit_as_child_proof(
@@ -4380,7 +4461,7 @@ class TestThreadingBehavior:
                 },
             ], True
 
-        resolved_thread_id = await resolve_event_thread_id(
+        resolution = await resolve_event_thread_membership(
             room_id,
             plain_reply_event_info,
             event_id=plain_reply_id,
@@ -4391,109 +4472,14 @@ class TestThreadingBehavior:
             ),
         )
 
-        assert resolved_thread_id is None
+        assert resolution.state is ThreadResolutionState.ROOM_LEVEL
+        assert resolution.thread_id is None
 
     @pytest.mark.asyncio
-    async def test_snapshot_thread_membership_access_treats_root_with_children_as_threaded(
+    async def test_related_thread_resolution_marks_event_lookup_failure_indeterminate(
         self,
     ) -> None:
-        """Snapshot-backed access should apply the same root-children contract."""
-        room_id = "!test:localhost"
-        thread_root_id = "$thread_root:localhost"
-        root_event_info = EventInfo.from_event(
-            {
-                "content": {
-                    "body": "root",
-                    "msgtype": "m.text",
-                },
-                "event_id": thread_root_id,
-                "sender": "@user:localhost",
-                "origin_server_ts": 1,
-                "room_id": room_id,
-                "type": "m.room.message",
-            },
-        )
-
-        @dataclass(frozen=True)
-        class SnapshotMessage:
-            event_id: str
-
-        async def lookup_thread_id(_room_id: str, _event_id: str) -> str | None:
-            return None
-
-        async def fetch_event_info(_room_id: str, event_id: str) -> EventInfo | None:
-            return root_event_info if event_id == thread_root_id else None
-
-        async def fetch_thread_snapshot(
-            lookup_room_id: str,
-            requested_thread_root_id: str,
-        ) -> list[SnapshotMessage]:
-            assert lookup_room_id == room_id
-            assert requested_thread_root_id == thread_root_id
-            return [
-                SnapshotMessage(event_id=thread_root_id),
-                SnapshotMessage(event_id="$child:localhost"),
-            ]
-
-        resolved_thread_id = await _resolve_related_event_thread_id(
-            room_id,
-            thread_root_id,
-            access=_snapshot_thread_membership_access(
-                lookup_thread_id=lookup_thread_id,
-                fetch_event_info=fetch_event_info,
-                fetch_thread_snapshot=fetch_thread_snapshot,
-            ),
-        )
-
-        assert resolved_thread_id == thread_root_id
-
-    @pytest.mark.asyncio
-    async def test_snapshot_thread_membership_access_propagates_root_proof_failure(
-        self,
-    ) -> None:
-        """Snapshot proof failures should surface instead of silently downgrading membership."""
-        room_id = "!test:localhost"
-        thread_root_id = "$thread_root:localhost"
-        root_event_info = EventInfo.from_event(
-            {
-                "content": {
-                    "body": "root",
-                    "msgtype": "m.text",
-                },
-                "event_id": thread_root_id,
-                "sender": "@user:localhost",
-                "origin_server_ts": 1,
-                "room_id": room_id,
-                "type": "m.room.message",
-            },
-        )
-
-        async def lookup_thread_id(_room_id: str, _event_id: str) -> str | None:
-            return None
-
-        async def fetch_event_info(_room_id: str, event_id: str) -> EventInfo | None:
-            return root_event_info if event_id == thread_root_id else None
-
-        async def fetch_thread_snapshot(_room_id: str, _thread_root_id: str) -> list[object]:
-            msg = "snapshot unavailable"
-            raise RuntimeError(msg)
-
-        with pytest.raises(RuntimeError, match="snapshot unavailable"):
-            await _resolve_related_event_thread_id(
-                room_id,
-                thread_root_id,
-                access=_snapshot_thread_membership_access(
-                    lookup_thread_id=lookup_thread_id,
-                    fetch_event_info=fetch_event_info,
-                    fetch_thread_snapshot=fetch_thread_snapshot,
-                ),
-            )
-
-    @pytest.mark.asyncio
-    async def test_related_thread_resolution_propagates_event_lookup_failure(
-        self,
-    ) -> None:
-        """Strict resolution should fail closed when related-event lookup is unavailable."""
+        """Membership resolution should preserve lookup failures as indeterminate candidates."""
         room_id = "!test:localhost"
         related_event_id = "$related:localhost"
 
@@ -4507,16 +4493,20 @@ class TestThreadingBehavior:
         async def prove_thread_root(_room_id: str, _thread_root_id: str) -> ThreadRootProof:
             return ThreadRootProof.not_a_thread_root()
 
-        with pytest.raises(RuntimeError, match="lookup unavailable"):
-            await _resolve_related_event_thread_id(
-                room_id,
-                related_event_id,
-                access=ThreadMembershipAccess(
-                    lookup_thread_id=lookup_thread_id,
-                    fetch_event_info=fetch_event_info,
-                    prove_thread_root=prove_thread_root,
-                ),
-            )
+        resolution = await resolve_related_event_thread_membership(
+            room_id,
+            related_event_id,
+            access=ThreadMembershipAccess(
+                lookup_thread_id=lookup_thread_id,
+                fetch_event_info=fetch_event_info,
+                prove_thread_root=prove_thread_root,
+            ),
+        )
+
+        assert resolution.state is ThreadResolutionState.INDETERMINATE
+        assert resolution.candidate_thread_root_id == related_event_id
+        assert isinstance(resolution.error, RuntimeError)
+        assert str(resolution.error) == "lookup unavailable"
 
     @pytest.mark.asyncio
     async def test_best_effort_related_thread_resolution_degrades_when_event_lookup_fails(
@@ -4549,6 +4539,67 @@ class TestThreadingBehavior:
         assert resolved_thread_id is None
 
     @pytest.mark.asyncio
+    async def test_related_thread_resolution_preserves_candidate_when_event_lookup_fails(
+        self,
+    ) -> None:
+        """Lookup failures should preserve the related event as an indeterminate candidate."""
+        room_id = "!test:localhost"
+        related_event_id = "$related:localhost"
+
+        async def lookup_thread_id(_room_id: str, _event_id: str) -> str | None:
+            return None
+
+        async def fetch_event_info(_room_id: str, _event_id: str) -> EventInfo | None:
+            msg = "lookup unavailable"
+            raise RuntimeError(msg)
+
+        async def prove_thread_root(_room_id: str, _thread_root_id: str) -> ThreadRootProof:
+            return ThreadRootProof.not_a_thread_root()
+
+        resolution = await resolve_related_event_thread_membership(
+            room_id,
+            related_event_id,
+            access=ThreadMembershipAccess(
+                lookup_thread_id=lookup_thread_id,
+                fetch_event_info=fetch_event_info,
+                prove_thread_root=prove_thread_root,
+            ),
+        )
+
+        assert resolution.state is ThreadResolutionState.INDETERMINATE
+        assert resolution.candidate_thread_root_id == related_event_id
+
+    @pytest.mark.asyncio
+    async def test_related_thread_resolution_preserves_candidate_when_event_lookup_returns_none(
+        self,
+    ) -> None:
+        """Missing related events should still preserve the related event as a candidate."""
+        room_id = "!test:localhost"
+        related_event_id = "$related:localhost"
+
+        async def lookup_thread_id(_room_id: str, _event_id: str) -> str | None:
+            return None
+
+        async def fetch_event_info(_room_id: str, _event_id: str) -> EventInfo | None:
+            return None
+
+        async def prove_thread_root(_room_id: str, _thread_root_id: str) -> ThreadRootProof:
+            return ThreadRootProof.not_a_thread_root()
+
+        resolution = await resolve_related_event_thread_membership(
+            room_id,
+            related_event_id,
+            access=ThreadMembershipAccess(
+                lookup_thread_id=lookup_thread_id,
+                fetch_event_info=fetch_event_info,
+                prove_thread_root=prove_thread_root,
+            ),
+        )
+
+        assert resolution.state is ThreadResolutionState.INDETERMINATE
+        assert resolution.candidate_thread_root_id == related_event_id
+
+    @pytest.mark.asyncio
     async def test_best_effort_related_thread_resolution_degrades_when_root_proof_fails(
         self,
     ) -> None:
@@ -4575,17 +4626,17 @@ class TestThreadingBehavior:
         async def fetch_event_info(_room_id: str, event_id: str) -> EventInfo | None:
             return root_event_info if event_id == thread_root_id else None
 
-        async def fetch_thread_snapshot(_room_id: str, _thread_root_id: str) -> list[object]:
-            msg = "snapshot unavailable"
+        async def fetch_thread_messages(_room_id: str, _thread_root_id: str) -> list[object]:
+            msg = "thread history unavailable"
             raise RuntimeError(msg)
 
         resolved_thread_id = await resolve_related_event_thread_id_best_effort(
             room_id,
             thread_root_id,
-            access=_snapshot_thread_membership_access(
+            access=thread_messages_thread_membership_access(
                 lookup_thread_id=lookup_thread_id,
                 fetch_event_info=fetch_event_info,
-                fetch_thread_snapshot=fetch_thread_snapshot,
+                fetch_thread_messages=fetch_thread_messages,
             ),
         )
 
@@ -6144,52 +6195,6 @@ class TestThreadingBehavior:
         assert queued_update_started.is_set()
 
     @pytest.mark.asyncio
-    async def test_get_thread_snapshot_refresh_runs_under_same_thread_write_barrier(self) -> None:
-        """Snapshot refreshes should serialize with same-thread mutations without blocking other threads."""
-        access = MatrixConversationCache(
-            logger=MagicMock(),
-            runtime=_conversation_runtime(),
-        )
-        refresh_started = asyncio.Event()
-        allow_refresh = asyncio.Event()
-        queued_update_started = asyncio.Event()
-
-        async def slow_refresh(
-            _room_id: str,
-            _thread_id: str,
-            **_kwargs: object,
-        ) -> ThreadHistoryResult:
-            refresh_started.set()
-            await allow_refresh.wait()
-            return thread_history_result(
-                [_message(event_id="$thread:localhost", body="Root")],
-                is_full_history=True,
-            )
-
-        async def queued_update() -> None:
-            queued_update_started.set()
-
-        access._reads.fetch_thread_snapshot_from_client = AsyncMock(side_effect=slow_refresh)
-
-        refresh_task = asyncio.create_task(access.get_thread_snapshot("!test:localhost", "$thread:localhost"))
-        await asyncio.wait_for(refresh_started.wait(), timeout=1.0)
-
-        access.runtime.event_cache_write_coordinator.queue_thread_update(
-            "!test:localhost",
-            "$thread:localhost",
-            lambda: queued_update(),
-            name="matrix_cache_follow_up_update",
-        )
-        await asyncio.sleep(0)
-        assert queued_update_started.is_set() is False
-
-        allow_refresh.set()
-        await refresh_task
-        await access.runtime.event_cache_write_coordinator.wait_for_room_idle("!test:localhost")
-
-        assert queued_update_started.is_set()
-
-    @pytest.mark.asyncio
     async def test_thread_read_refetches_once_mutation_starts_after_room_barrier(self) -> None:
         """A read already past the room barrier must still refetch once a mutation starts."""
         event_cache = _runtime_event_cache()
@@ -6447,19 +6452,6 @@ class TestThreadingBehavior:
             read_thread=MatrixConversationCache.get_thread_history,
             force_refetch_reason="test_force_thread_history_refetch",
             expected_full_history=True,
-        )
-
-    @pytest.mark.asyncio
-    async def test_thread_snapshot_guard_rejects_cache_when_unknown_live_mutation_races_fetch(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """A thread snapshot fetched before room invalidation must not validate stale cache."""
-        await _assert_thread_read_guard_rejects_cache_when_unknown_live_mutation_races_fetch(
-            tmp_path,
-            read_thread=MatrixConversationCache.get_thread_snapshot,
-            force_refetch_reason="test_force_thread_snapshot_refetch",
-            expected_full_history=False,
         )
 
     @pytest.mark.asyncio
@@ -6722,56 +6714,6 @@ class TestThreadingBehavior:
 
         with pytest.raises(RuntimeError, match="boom"):
             await access.get_dispatch_thread_snapshot("!test:localhost", "$thread:localhost")
-
-    @pytest.mark.asyncio
-    async def test_get_thread_messages_routes_through_collapsed_read_primitive(self) -> None:
-        """Thread reads should route through one internal primitive with explicit mode flags."""
-        access = MatrixConversationCache(
-            logger=MagicMock(),
-            runtime=_conversation_runtime(),
-        )
-        expected = thread_history_result(
-            [_message(event_id="$thread:localhost", body="Root")],
-            is_full_history=True,
-        )
-
-        access.get_dispatch_thread_history = AsyncMock(return_value=expected)
-
-        result = await access.get_thread_messages(
-            "!test:localhost",
-            "$thread:localhost",
-            full_history=True,
-            dispatch_safe=True,
-            caller_label="test_label",
-        )
-
-        assert result == expected
-        access.get_dispatch_thread_history.assert_awaited_once_with(
-            "!test:localhost",
-            "$thread:localhost",
-            caller_label="test_label",
-        )
-
-        expected_snapshot = thread_history_result(
-            [_message(event_id="$thread:localhost", body="Root")],
-            is_full_history=False,
-        )
-        access.get_dispatch_thread_snapshot = AsyncMock(return_value=expected_snapshot)
-
-        snapshot_result = await access.get_thread_messages(
-            "!test:localhost",
-            "$thread:localhost",
-            full_history=False,
-            dispatch_safe=True,
-            caller_label="snapshot_label",
-        )
-
-        assert snapshot_result == expected_snapshot
-        access.get_dispatch_thread_snapshot.assert_awaited_once_with(
-            "!test:localhost",
-            "$thread:localhost",
-            caller_label="snapshot_label",
-        )
 
     @pytest.mark.asyncio
     async def test_live_event_cache_update_recovers_after_same_room_failure(self) -> None:
@@ -7747,6 +7689,7 @@ class TestThreadingBehavior:
         # Initialize response tracking
 
         # Mock interactive.handle_text_response and make AI fast
+        resolver = unwrap_extracted_collaborator(bot._conversation_resolver)
         with (
             patch("mindroom.turn_controller.interactive.handle_text_response", AsyncMock(return_value=None)),
             patch("mindroom.response_runner.ai_response", AsyncMock(return_value="OK")),
@@ -7761,7 +7704,17 @@ class TestThreadingBehavior:
             ),
             patch.object(
                 bot._conversation_cache,
-                "get_thread_messages",
+                "get_dispatch_thread_history",
+                AsyncMock(return_value=thread_history_result([], is_full_history=True)),
+            ),
+            patch.object(
+                resolver,
+                "fetch_thread_history",
+                AsyncMock(return_value=thread_history_result([], is_full_history=True)),
+            ),
+            patch.object(
+                bot._conversation_cache,
+                "get_strict_thread_history",
                 AsyncMock(return_value=thread_history_result([], is_full_history=True)),
             ),
         ):
@@ -7814,7 +7767,7 @@ class TestThreadingBehavior:
         with patch.object(
             bot._conversation_cache,
             "get_thread_history",
-            AsyncMock(return_value=expected_history),
+            AsyncMock(return_value=thread_history_result(expected_history, is_full_history=True)),
         ) as mock_fetch:
             context = await bot._conversation_resolver.extract_message_context(room, event)
 
@@ -7874,7 +7827,7 @@ class TestThreadingBehavior:
         with patch.object(
             bot._conversation_cache,
             "get_thread_history",
-            AsyncMock(return_value=expected_history),
+            AsyncMock(return_value=thread_history_result(expected_history, is_full_history=True)),
         ) as mock_fetch:
             context = await bot._conversation_resolver.extract_message_context(room, event)
 
@@ -7986,7 +7939,7 @@ class TestThreadingBehavior:
             patch.object(
                 bot._conversation_cache,
                 "get_thread_history",
-                AsyncMock(return_value=expected_history),
+                AsyncMock(return_value=thread_history_result(expected_history, is_full_history=True)),
             ) as mock_fetch,
         ):
             context = await bot._conversation_resolver.extract_message_context(room, event)
@@ -8048,13 +8001,8 @@ class TestThreadingBehavior:
             patch.object(
                 bot._conversation_cache,
                 "get_thread_history",
-                AsyncMock(return_value=expected_history),
+                AsyncMock(return_value=thread_history_result(expected_history, is_full_history=True)),
             ) as mock_fetch,
-            patch.object(
-                bot._conversation_cache,
-                "get_thread_snapshot",
-                AsyncMock(return_value=expected_history),
-            ) as mock_snapshot,
         ):
             context = await bot._conversation_resolver.extract_message_context(room, event)
 
@@ -8063,8 +8011,7 @@ class TestThreadingBehavior:
         assert context.thread_history == expected_history
         bot.event_cache.get_thread_id_for_event.assert_awaited_once_with(room.room_id, "$thread_root:localhost")
         bot.client.room_get_event.assert_awaited_once_with(room.room_id, "$thread_root:localhost")
-        mock_snapshot.assert_not_called()
-        assert mock_fetch.await_count == 2
+        mock_fetch.assert_awaited_once_with(room.room_id, "$thread_root:localhost", caller_label="message_context")
 
     @pytest.mark.asyncio
     async def test_extract_context_plain_reply_chain_stays_threaded_transitively(
@@ -8137,11 +8084,14 @@ class TestThreadingBehavior:
                 bot._conversation_cache,
                 "get_thread_history",
                 AsyncMock(
-                    return_value=[
-                        _message(event_id="$thread_root:localhost", body="Root message"),
-                        _message(event_id="$thread_msg:localhost", body="Thread reply"),
-                        _message(event_id="$plain_reply_1:localhost", body="first bridge reply"),
-                    ],
+                    return_value=thread_history_result(
+                        [
+                            _message(event_id="$thread_root:localhost", body="Root message"),
+                            _message(event_id="$thread_msg:localhost", body="Thread reply"),
+                            _message(event_id="$plain_reply_1:localhost", body="first bridge reply"),
+                        ],
+                        is_full_history=True,
+                    ),
                 ),
             ) as mock_fetch,
         ):
@@ -8216,7 +8166,12 @@ class TestThreadingBehavior:
             patch.object(
                 bot._conversation_cache,
                 "get_thread_history",
-                AsyncMock(return_value=[_message(event_id="$thread_root:localhost", body="root")]),
+                AsyncMock(
+                    return_value=thread_history_result(
+                        [_message(event_id="$thread_root:localhost", body="root")],
+                        is_full_history=True,
+                    ),
+                ),
             ) as mock_fetch,
         ):
             context = await bot._conversation_resolver.extract_message_context(room, event)
@@ -8299,7 +8254,7 @@ class TestThreadingBehavior:
             with patch.object(
                 bot._conversation_cache,
                 "get_thread_history",
-                AsyncMock(return_value=expected_history),
+                AsyncMock(return_value=thread_history_result(expected_history, is_full_history=True)),
             ) as mock_fetch:
                 context = await bot._conversation_resolver.extract_message_context(room, event)
 
@@ -8365,13 +8320,8 @@ class TestThreadingBehavior:
         with (
             patch.object(
                 bot._conversation_cache,
-                "get_thread_snapshot",
-                AsyncMock(),
-            ) as mock_snapshot,
-            patch.object(
-                bot._conversation_cache,
                 "get_thread_history",
-                AsyncMock(return_value=expected_history),
+                AsyncMock(return_value=thread_history_result(expected_history, is_full_history=True)),
             ) as mock_history,
         ):
             context = await bot._conversation_resolver.extract_message_context(room, event)
@@ -8381,8 +8331,7 @@ class TestThreadingBehavior:
         assert context.thread_history == expected_history
         bot.client.room_get_event.assert_awaited_once_with(room.room_id, "$thread_root:localhost")
         bot.event_cache.get_thread_id_for_event.assert_awaited_once_with(room.room_id, "$thread_root:localhost")
-        mock_snapshot.assert_not_called()
-        assert mock_history.await_count == 2
+        mock_history.assert_awaited_once_with(room.room_id, "$thread_root:localhost", caller_label="message_context")
 
     @pytest.mark.asyncio
     async def test_extract_context_edit_of_promoted_plain_reply_refetches_thread_when_lookup_cache_is_cold(
@@ -8458,7 +8407,7 @@ class TestThreadingBehavior:
         with patch.object(
             bot._conversation_cache,
             "get_thread_history",
-            AsyncMock(return_value=expected_history),
+            AsyncMock(return_value=thread_history_result(expected_history, is_full_history=True)),
         ) as mock_fetch:
             context = await bot._conversation_resolver.extract_message_context(room, event)
 
@@ -8471,7 +8420,7 @@ class TestThreadingBehavior:
         assert mock_fetch.await_args.args == (room.room_id, "$thread-root:localhost")
 
     @pytest.mark.asyncio
-    async def test_extract_context_edit_of_plain_root_message_stays_room_level_when_snapshot_has_only_root(
+    async def test_extract_context_edit_of_plain_root_message_stays_room_level_when_history_has_only_root(
         self,
         bot: AgentBot,
     ) -> None:
@@ -8518,23 +8467,23 @@ class TestThreadingBehavior:
 
         with patch.object(
             bot._conversation_cache,
-            "get_thread_snapshot",
+            "get_thread_history",
             AsyncMock(
                 return_value=ThreadHistoryResult(
                     [_message(event_id="$room_root:localhost", body="Room root")],
-                    is_full_history=False,
+                    is_full_history=True,
                 ),
             ),
-        ) as mock_snapshot:
-            context = await bot._conversation_resolver.extract_message_context(room, event, full_history=False)
+        ) as mock_history:
+            context = await bot._conversation_resolver.extract_message_context(room, event)
 
         assert context.is_thread is False
         assert context.thread_id is None
         assert context.thread_history == []
         bot.client.room_get_event.assert_awaited_once_with(room.room_id, "$room_root:localhost")
         bot.event_cache.get_thread_id_for_event.assert_awaited_once_with(room.room_id, "$room_root:localhost")
-        mock_snapshot.assert_awaited_once()
-        assert mock_snapshot.await_args.args == (room.room_id, "$room_root:localhost")
+        mock_history.assert_awaited_once()
+        assert mock_history.await_args.args == (room.room_id, "$room_root:localhost")
 
     @pytest.mark.asyncio
     async def test_extract_context_edit_of_plain_root_message_degrades_when_thread_lookup_fails(
@@ -8688,7 +8637,7 @@ class TestThreadingBehavior:
         with patch.object(
             bot._conversation_cache,
             "get_thread_history",
-            AsyncMock(return_value=expected_history),
+            AsyncMock(return_value=thread_history_result(expected_history, is_full_history=True)),
         ) as mock_fetch:
             context = await bot._conversation_resolver.extract_message_context(room, event)
 
@@ -8752,23 +8701,22 @@ class TestThreadingBehavior:
             },
         )
 
-        thread_id = await bot._conversation_resolver._explicit_thread_id_for_event(
+        thread_lookup = await bot._conversation_resolver._explicit_thread_id_for_event(
             "!test:localhost",
             "$incoming-edit:localhost",
             event_info,
-            full_history=False,
-            dispatch_safe=False,
+            mode=ThreadReadMode.ADVISORY_FULL,
             caller_label="threading_error_test",
         )
 
-        assert thread_id is None
+        assert thread_lookup.thread_id is None
 
     @pytest.mark.asyncio
-    async def test_extract_dispatch_context_plain_reply_inherits_thread_and_marks_full_history_required(
+    async def test_extract_dispatch_context_plain_reply_inherits_thread_with_bounded_full_history(
         self,
         bot: AgentBot,
     ) -> None:
-        """Dispatch preview should inherit an existing explicit thread across plain replies."""
+        """Dispatch policy context should inherit an existing explicit thread across plain replies."""
         _clear_mxc_cache()
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
@@ -8803,13 +8751,13 @@ class TestThreadingBehavior:
         )
         bot.client.room_get_event = AsyncMock()
 
-        preview_snapshot = ThreadHistoryResult(
+        dispatch_history = ThreadHistoryResult(
             [
                 _message(event_id="$thread_root:localhost", body="Root"),
                 _message(event_id="$thread_msg:localhost", body="Earlier threaded message"),
-                _message(event_id="$plain1:localhost", body="Preview plain reply [Message continues in attached file]"),
+                _message(event_id="$plain1:localhost", body="Plain reply"),
             ],
-            is_full_history=False,
+            is_full_history=True,
         )
         with (
             patch.object(
@@ -8819,16 +8767,17 @@ class TestThreadingBehavior:
             ) as mock_lookup,
             patch.object(
                 bot._conversation_cache,
-                "get_dispatch_thread_snapshot",
-                new=AsyncMock(return_value=preview_snapshot),
-            ) as mock_snapshot,
+                "get_dispatch_thread_history",
+                new=AsyncMock(return_value=dispatch_history),
+            ) as mock_history,
             patch.object(
                 bot._conversation_cache,
                 "get_thread_history",
                 AsyncMock(),
             ) as mock_fetch,
         ):
-            preview_context = await bot._conversation_resolver.extract_dispatch_context(room, event)
+            preview_context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
+            preview_context = preview_context_result.context
 
             assert preview_context.is_thread is True
             assert preview_context.thread_id == "$thread_root:localhost"
@@ -8837,20 +8786,20 @@ class TestThreadingBehavior:
                 "$thread_msg:localhost",
                 "$plain1:localhost",
             ]
-            assert preview_context.requires_full_thread_history is True
+            assert preview_context.requires_model_history_refresh is False
             bot.client.download.assert_not_awaited()
             bot.client.room_get_event.assert_not_awaited()
             mock_lookup.assert_awaited_once_with(room.room_id, "$plain1:localhost")
-            mock_snapshot.assert_awaited_once()
-            assert mock_snapshot.await_args.args == (room.room_id, "$thread_root:localhost")
+            mock_history.assert_awaited_once()
+            assert mock_history.await_args.args == (room.room_id, "$thread_root:localhost")
             mock_fetch.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_extract_dispatch_context_routes_preview_reads_through_single_cache_entrypoint(
+    async def test_extract_dispatch_context_routes_bounded_full_reads_through_single_cache_entrypoint(
         self,
         bot: AgentBot,
     ) -> None:
-        """Dispatch preview resolution should select read mode through one cache helper."""
+        """Dispatch resolution should select the bounded full read through one cache helper."""
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
         room.name = "Test Room"
@@ -8868,12 +8817,12 @@ class TestThreadingBehavior:
                 "type": "m.room.message",
             },
         )
-        preview_snapshot = ThreadHistoryResult(
+        dispatch_history = ThreadHistoryResult(
             [
                 _message(event_id="$thread_root:localhost", body="Root"),
-                _message(event_id="$plain1:localhost", body="Preview"),
+                _message(event_id="$plain1:localhost", body="Plain reply"),
             ],
-            is_full_history=False,
+            is_full_history=True,
         )
 
         with (
@@ -8884,23 +8833,615 @@ class TestThreadingBehavior:
             ),
             patch.object(
                 bot._conversation_cache,
-                "get_thread_messages",
-                AsyncMock(return_value=preview_snapshot),
-                create=True,
+                "get_dispatch_thread_history",
+                AsyncMock(return_value=dispatch_history),
             ) as mock_read,
         ):
-            context = await bot._conversation_resolver.extract_dispatch_context(room, event)
+            context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
+            context = context_result.context
 
         assert context.is_thread is True
         assert context.thread_id == "$thread_root:localhost"
-        assert context.requires_full_thread_history is True
+        assert context.requires_model_history_refresh is False
         mock_read.assert_awaited_once_with(
             room.room_id,
             "$thread_root:localhost",
-            full_history=False,
-            dispatch_safe=True,
             caller_label="dispatch_context",
         )
+
+    @pytest.mark.asyncio
+    async def test_dispatch_room_demotion_clears_source_and_resolved_thread_ids(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """Degraded root proof should demote an indeterminate plain-reply candidate to room-level dispatch."""
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.name = "Test Room"
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "plain reply to root",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$thread_root:localhost"}},
+                },
+                "event_id": "$event:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+            },
+        )
+        root_response = nio.RoomGetEventResponse.from_dict(
+            {
+                "content": {"body": "root", "msgtype": "m.text"},
+                "event_id": "$thread_root:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567880,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+            },
+        )
+        degraded_history = ThreadHistoryResult(
+            [],
+            is_full_history=False,
+            diagnostics={
+                THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
+                THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
+                THREAD_HISTORY_ERROR_DIAGNOSTIC: "cache_coordinator_timeout",
+            },
+        )
+
+        with (
+            patch.object(
+                bot._conversation_cache,
+                "get_thread_id_for_event",
+                AsyncMock(return_value=None),
+            ) as mock_lookup,
+            patch.object(
+                bot._conversation_cache,
+                "get_event",
+                AsyncMock(return_value=root_response),
+            ) as mock_get_event,
+            patch.object(
+                bot._conversation_cache,
+                "get_dispatch_thread_history",
+                AsyncMock(return_value=degraded_history),
+            ) as mock_read,
+        ):
+            context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
+            context = context_result.context
+
+        assert context_result.thread_context is not None
+        assert context_result.thread_context.candidate_thread_root_id == "$thread_root:localhost"
+        assert context_result.thread_context.stable_target.source_thread_id is None
+        assert context_result.thread_context.stable_target.resolved_thread_id is None
+        assert context.is_thread is False
+        assert context.thread_id is None
+        assert context.thread_history == []
+        assert context_result.thread_context.thread_history == []
+        assert context_result.thread_context.replay_guard_history is degraded_history
+        assert context.requires_model_history_refresh is False
+        assert context.planning_thread_history == ()
+        mock_lookup.assert_awaited_once_with(room.room_id, "$thread_root:localhost")
+        mock_get_event.assert_awaited_once_with(room.room_id, "$thread_root:localhost")
+        mock_read.assert_awaited_once_with(
+            room.room_id,
+            "$thread_root:localhost",
+            caller_label="dispatch_context",
+        )
+
+    @pytest.mark.asyncio
+    async def test_dispatch_candidate_without_proof_history_demotes_without_retry(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """Proof-unavailable candidates without reusable history must demote without repeating the failed read."""
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.name = "Test Room"
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "plain reply to maybe-root",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$maybe_root:localhost"}},
+                },
+                "event_id": "$event:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+            },
+        )
+        root_response = nio.RoomGetEventResponse.from_dict(
+            {
+                "content": {"body": "maybe root", "msgtype": "m.text"},
+                "event_id": "$maybe_root:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567880,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+            },
+        )
+
+        with (
+            patch.object(bot._conversation_cache, "get_thread_id_for_event", AsyncMock(return_value=None)),
+            patch.object(bot._conversation_cache, "get_event", AsyncMock(return_value=root_response)),
+            patch.object(
+                bot._conversation_cache,
+                "get_dispatch_thread_history",
+                AsyncMock(side_effect=TimeoutError("dispatch read timed out")),
+            ) as mock_read,
+        ):
+            context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
+            context = context_result.context
+
+        assert context_result.thread_context is not None
+        assert context_result.thread_context.candidate_thread_root_id == "$maybe_root:localhost"
+        assert context_result.thread_context.replay_guard_degraded is True
+        assert context_result.thread_context.replay_guard_history == []
+        assert context.is_thread is False
+        assert context.thread_id is None
+        assert context.thread_history == []
+        assert context.requires_model_history_refresh is False
+        mock_read.assert_awaited_once_with(
+            room.room_id,
+            "$maybe_root:localhost",
+            caller_label="dispatch_context",
+        )
+
+    @pytest.mark.asyncio
+    async def test_dispatch_related_lookup_failure_keeps_candidate_root(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """Related-event lookup failures should demote while keeping the candidate root for dispatch."""
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.name = "Test Room"
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "plain reply to maybe-root",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$maybe_root:localhost"}},
+                },
+                "event_id": "$event:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+            },
+        )
+
+        with (
+            patch.object(bot._conversation_cache, "get_thread_id_for_event", AsyncMock(return_value=None)),
+            patch.object(bot._conversation_cache, "get_event", AsyncMock(side_effect=RuntimeError("lookup failed"))),
+            patch.object(bot._conversation_cache, "get_dispatch_thread_history", AsyncMock()) as mock_read,
+        ):
+            context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
+
+        assert context_result.thread_context is not None
+        assert context_result.thread_context.candidate_thread_root_id == "$maybe_root:localhost"
+        assert context_result.thread_context.stable_target.source_thread_id is None
+        assert context_result.thread_context.stable_target.resolved_thread_id is None
+        assert context_result.thread_context.replay_guard_degraded is True
+        assert context_result.context.is_thread is False
+        assert context_result.context.thread_id is None
+        mock_read.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_dispatch_related_not_found_keeps_candidate_root(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """M_NOT_FOUND related-event lookups should demote while keeping the candidate root for dispatch."""
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.name = "Test Room"
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "plain reply to missing root",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$missing_root:localhost"}},
+                },
+                "event_id": "$event:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+            },
+        )
+
+        with (
+            patch.object(bot._conversation_cache, "get_thread_id_for_event", AsyncMock(return_value=None)),
+            patch.object(
+                bot._conversation_cache,
+                "get_event",
+                AsyncMock(return_value=nio.RoomGetEventError("missing", status_code="M_NOT_FOUND")),
+            ),
+            patch.object(bot._conversation_cache, "get_dispatch_thread_history", AsyncMock()) as mock_read,
+        ):
+            context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
+
+        assert context_result.thread_context is not None
+        assert context_result.thread_context.candidate_thread_root_id == "$missing_root:localhost"
+        assert context_result.thread_context.stable_target.source_thread_id is None
+        assert context_result.thread_context.stable_target.resolved_thread_id is None
+        assert context_result.thread_context.replay_guard_degraded is True
+        assert context_result.context.is_thread is False
+        assert context_result.context.thread_id is None
+        mock_read.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_advisory_context_missing_related_reply_demotes_room_level(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """Advisory context extraction should not fail closed for missing/redacted related events."""
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.name = "Test Room"
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "plain reply to redacted root",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$redacted_root:localhost"}},
+                },
+                "event_id": "$event:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+            },
+        )
+
+        with (
+            patch.object(bot._conversation_cache, "get_thread_id_for_event", AsyncMock(return_value=None)),
+            patch.object(
+                bot._conversation_cache,
+                "get_event",
+                AsyncMock(return_value=nio.RoomGetEventError("missing", status_code="M_NOT_FOUND")),
+            ),
+            patch.object(bot._conversation_cache, "get_thread_history", AsyncMock()) as mock_read,
+        ):
+            context = await bot._conversation_resolver.extract_message_context(room, event)
+
+        assert context.is_thread is False
+        assert context.thread_id is None
+        assert context.thread_history == []
+        assert context.requires_model_history_refresh is False
+        mock_read.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_dispatch_new_root_target_does_not_become_existing_thread_context(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """A room-level inbound message may start a delivery thread without existing thread context."""
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.name = "Test Room"
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "@mindroom_general start here",
+                    "msgtype": "m.text",
+                    "m.mentions": {"user_ids": ["@mindroom_general:localhost"]},
+                },
+                "event_id": "$new_root:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+            },
+        )
+
+        context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
+        context = context_result.context
+
+        assert context_result.thread_context is not None
+        assert context_result.thread_context.stable_target.source_thread_id is None
+        assert context_result.thread_context.stable_target.resolved_thread_id == "$new_root:localhost"
+        assert context.is_thread is False
+        assert context.thread_id is None
+        assert context.thread_history == []
+        assert context.requires_model_history_refresh is False
+        assert context.planning_thread_history == ()
+
+    @pytest.mark.asyncio
+    async def test_extract_dispatch_context_plain_reply_to_plain_message_stays_room_level_with_empty_history(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """Empty bounded history should not promote plain replies to threads."""
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.name = "Test Room"
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "plain reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$plain:localhost"}},
+                },
+                "event_id": "$event:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+            },
+        )
+        plain_response = nio.RoomGetEventResponse.from_dict(
+            {
+                "content": {"body": "not a thread root", "msgtype": "m.text"},
+                "event_id": "$plain:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567880,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+            },
+        )
+        empty_history = ThreadHistoryResult(
+            [],
+            is_full_history=True,
+            diagnostics={THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_CACHE},
+        )
+
+        with (
+            patch.object(
+                bot._conversation_cache,
+                "get_thread_id_for_event",
+                AsyncMock(return_value=None),
+            ),
+            patch.object(
+                bot._conversation_cache,
+                "get_event",
+                AsyncMock(return_value=plain_response),
+            ),
+            patch.object(
+                bot._conversation_cache,
+                "get_dispatch_thread_history",
+                AsyncMock(return_value=empty_history),
+            ),
+        ):
+            context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
+            context = context_result.context
+
+        assert context.is_thread is False
+        assert context.thread_id is None
+        assert context.thread_history == []
+        assert context.requires_model_history_refresh is False
+
+    @pytest.mark.asyncio
+    async def test_degraded_dispatch_candidate_does_not_call_strict_proof_before_planning(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """Degraded dispatch candidates must be demoted before policy without strict proof."""
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.name = "Test Room"
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "follow-up",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$thread_root:localhost"}},
+                },
+                "event_id": "$event:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+            },
+        )
+        degraded_history = ThreadHistoryResult(
+            [],
+            is_full_history=False,
+            diagnostics={
+                THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
+                THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
+                THREAD_HISTORY_ERROR_DIAGNOSTIC: "cache_coordinator_timeout",
+            },
+        )
+        root_response = nio.RoomGetEventResponse.from_dict(
+            {
+                "content": {"body": "root", "msgtype": "m.text"},
+                "event_id": "$thread_root:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567880,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+            },
+        )
+        observed_targets = []
+
+        async def fake_plan(_room: object, _event: object, dispatch: object, **_kwargs: object) -> _DispatchPlan:
+            observed_targets.append(dispatch.target)
+            assert dispatch.context.is_thread is False
+            assert dispatch.context.thread_id is None
+            assert dispatch.context.planning_thread_history == ()
+            return _DispatchPlan(kind="ignore")
+
+        bot.event_cache.get_recent_room_events = AsyncMock(return_value=[])
+        with (
+            patch.object(bot._conversation_cache, "get_thread_id_for_event", AsyncMock(return_value=None)),
+            patch.object(bot._conversation_cache, "get_event", AsyncMock(return_value=root_response)),
+            patch.object(
+                bot._conversation_cache,
+                "get_dispatch_thread_history",
+                AsyncMock(return_value=degraded_history),
+            ),
+            patch.object(
+                bot._conversation_cache,
+                "get_strict_thread_history",
+                AsyncMock(side_effect=AssertionError("dispatch finalization must remain bounded")),
+            ) as mock_strict_history,
+            patch("mindroom.turn_policy.TurnPolicy.plan_turn", new=AsyncMock(side_effect=fake_plan)) as mock_plan,
+        ):
+            await bot._turn_controller._dispatch_text_message(room, event, "@user:localhost")
+
+        mock_strict_history.assert_not_awaited()
+        mock_plan.assert_awaited_once()
+        assert observed_targets
+        assert observed_targets[0].source_thread_id is None
+        assert observed_targets[0].resolved_thread_id is None
+
+    @pytest.mark.asyncio
+    async def test_degraded_dispatch_history_is_not_policy_grade_history(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """Degraded dispatch history can prove targets but not planning context."""
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.name = "Test Room"
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "thread follow-up",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root:localhost"},
+                },
+                "event_id": "$event:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+            },
+        )
+        degraded_history = ThreadHistoryResult(
+            [
+                _message(event_id="$thread_root:localhost", body="Root"),
+                _message(event_id="$reply:localhost", body="Reply"),
+            ],
+            is_full_history=False,
+            diagnostics={
+                THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
+                THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
+                THREAD_HISTORY_ERROR_DIAGNOSTIC: "cache_coordinator_timeout",
+            },
+        )
+        full_history = thread_history_result(list(degraded_history), is_full_history=True)
+        resolver = unwrap_extracted_collaborator(bot._conversation_resolver)
+        observed_policy_targets = []
+
+        async def fake_plan(_room: object, _event: object, dispatch: object, **_kwargs: object) -> _DispatchPlan:
+            observed_policy_targets.append(dispatch.target)
+            assert dispatch.context.is_thread is True
+            assert dispatch.context.thread_id == "$thread_root:localhost"
+            assert dispatch.context.planning_thread_history == ()
+            assert dispatch.context.planning_thread_history_unavailable is True
+            return _DispatchPlan(kind="ignore")
+
+        with (
+            patch.object(
+                bot._conversation_cache,
+                "get_dispatch_thread_history",
+                AsyncMock(return_value=degraded_history),
+            ),
+            patch("mindroom.turn_policy.TurnPolicy.plan_turn", new=AsyncMock(side_effect=fake_plan)) as mock_plan,
+        ):
+            await bot._turn_controller._dispatch_text_message(room, event, "@user:localhost")
+
+        mock_plan.assert_awaited_once()
+        assert observed_policy_targets[0].resolved_thread_id == "$thread_root:localhost"
+
+        with patch.object(
+            resolver,
+            "fetch_thread_history",
+            AsyncMock(return_value=full_history),
+        ) as mock_fetch_thread_history:
+            request = await bot._response_runner._refresh_model_history_after_lock(
+                ResponseRequest(
+                    room_id=room.room_id,
+                    reply_to_event_id=event.event_id,
+                    thread_id="$thread_root:localhost",
+                    thread_history=degraded_history,
+                    prompt="thread follow-up",
+                    requires_model_history_refresh=True,
+                ),
+            )
+
+        mock_fetch_thread_history.assert_awaited_once_with(
+            room.room_id,
+            "$thread_root:localhost",
+            caller_label="dispatch_post_lock_refresh",
+        )
+        assert request.thread_history == full_history
+
+    def test_thread_history_degraded_helper_honors_explicit_diagnostic_flag(
+        self,
+    ) -> None:
+        """Stale fallback history is degraded for planning even when its source is stale_cache."""
+        stale_degraded_history = ThreadHistoryResult(
+            [
+                _message(event_id="$thread_root:localhost", body="Root"),
+                _message(event_id="$reply:localhost", body="Reply"),
+            ],
+            is_full_history=True,
+            diagnostics={
+                THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_STALE_CACHE,
+                THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
+                THREAD_HISTORY_ERROR_DIAGNOSTIC: "homeserver unavailable",
+            },
+        )
+
+        assert is_thread_history_degraded(stale_degraded_history) is True
+
+    @pytest.mark.asyncio
+    async def test_thread_root_proof_accepts_stale_cache_fallback_with_children(
+        self,
+    ) -> None:
+        """Stale fallback history is degraded but still usable proof when it has children."""
+        room_id = "!test:localhost"
+        thread_root_id = "$thread_root:localhost"
+        thread_history = ThreadHistoryResult(
+            [
+                _message(event_id=thread_root_id, body="Root"),
+                _message(event_id="$reply:localhost", body="Reply"),
+            ],
+            is_full_history=False,
+            diagnostics={
+                THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_STALE_CACHE,
+                THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
+                THREAD_HISTORY_ERROR_DIAGNOSTIC: "homeserver unavailable",
+            },
+        )
+
+        async def lookup_thread_id(_room_id: str, _event_id: str) -> str | None:
+            return None
+
+        async def fetch_event_info(_room_id: str, _event_id: str) -> EventInfo | None:
+            return EventInfo.from_event(
+                {
+                    "content": {"body": "Root", "msgtype": "m.text"},
+                    "event_id": thread_root_id,
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 1234567880,
+                    "room_id": room_id,
+                    "type": "m.room.message",
+                },
+            )
+
+        async def fetch_thread_messages(_room_id: str, _thread_id: str) -> ThreadHistoryResult:
+            return thread_history
+
+        resolved_thread_id = await resolve_related_event_thread_id_best_effort(
+            room_id,
+            thread_root_id,
+            access=thread_messages_thread_membership_access(
+                lookup_thread_id=lookup_thread_id,
+                fetch_event_info=fetch_event_info,
+                fetch_thread_messages=fetch_thread_messages,
+            ),
+        )
+
+        assert resolved_thread_id == thread_root_id
 
     @pytest.mark.asyncio
     async def test_coalescing_thread_id_labels_thread_membership_reads(self, bot: AgentBot) -> None:
@@ -8931,16 +9472,20 @@ class TestThreadingBehavior:
                 MagicMock(return_value=access),
             ) as mock_access,
             patch(
-                "mindroom.conversation_resolver.resolve_event_thread_id_best_effort",
-                new=AsyncMock(return_value="$thread_root:localhost"),
+                "mindroom.conversation_resolver.resolve_event_thread_membership",
+                new=AsyncMock(
+                    return_value=ThreadResolution.indeterminate(
+                        RuntimeError("proof unavailable"),
+                        candidate_thread_root_id="$thread_root:localhost",
+                    ),
+                ),
             ) as mock_resolve,
         ):
             thread_id = await resolver.coalescing_thread_id(room, event)
 
         assert thread_id == "$thread_root:localhost"
         mock_access.assert_called_once_with(
-            full_history=False,
-            dispatch_safe=True,
+            mode=ThreadReadMode.DISPATCH_SNAPSHOT,
             caller_label="coalescing_thread_id",
         )
         mock_resolve.assert_awaited_once_with(
@@ -8949,6 +9494,35 @@ class TestThreadingBehavior:
             event_id=event.event_id,
             access=access,
         )
+
+    @pytest.mark.asyncio
+    async def test_coalescing_thread_id_keeps_lookup_failure_candidate(self, bot: AgentBot) -> None:
+        """Lookup-failed plain replies should still coalesce by candidate root."""
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "plain reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$maybe_root:localhost"}},
+                },
+                "event_id": "$event:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+            },
+        )
+        resolver = unwrap_extracted_collaborator(bot._conversation_resolver)
+
+        with (
+            patch.object(bot._conversation_cache, "get_thread_id_for_event", AsyncMock(return_value=None)),
+            patch.object(bot._conversation_cache, "get_event", AsyncMock(side_effect=RuntimeError("lookup failed"))),
+        ):
+            thread_id = await resolver.coalescing_thread_id(room, event)
+
+        assert thread_id == "$maybe_root:localhost"
 
     @pytest.mark.asyncio
     async def test_full_history_thread_resolution_uses_full_history_to_prove_root(
@@ -9007,40 +9581,28 @@ class TestThreadingBehavior:
             ) as mock_get_event,
             patch.object(
                 bot._conversation_cache,
-                "get_thread_snapshot",
-                AsyncMock(side_effect=AssertionError("snapshot should not be used for full-history proof")),
-            ) as mock_snapshot,
-            patch.object(
-                bot._conversation_cache,
                 "get_thread_history",
-                AsyncMock(return_value=thread_history),
+                AsyncMock(return_value=thread_history_result(thread_history, is_full_history=True)),
             ) as mock_history,
         ):
-            (
-                is_thread,
-                thread_id,
-                history,
-                requires_full_thread_history,
-            ) = await bot._conversation_resolver._resolve_thread_context(
+            thread_context = await bot._conversation_resolver._resolve_thread_context(
                 room_id,
                 incoming_event_id,
                 event_info,
-                full_history=True,
-                dispatch_safe=False,
+                mode=ThreadReadMode.ADVISORY_FULL,
                 caller_label="threading_error_test",
             )
 
-        assert is_thread is True
-        assert thread_id == "$thread_root:localhost"
-        assert [message.event_id for message in history] == [
+        assert thread_context.is_thread is True
+        assert thread_context.thread_id == "$thread_root:localhost"
+        assert [message.event_id for message in thread_context.thread_history] == [
             "$thread_root:localhost",
             "$thread_reply:localhost",
         ]
-        assert requires_full_thread_history is False
+        assert thread_context.requires_model_history_refresh is False
         mock_lookup.assert_awaited_once_with(room_id, "$thread_root:localhost")
         mock_get_event.assert_awaited_once_with(room_id, "$thread_root:localhost")
-        assert mock_history.await_count == 2
-        mock_snapshot.assert_not_called()
+        mock_history.assert_awaited_once_with(room_id, "$thread_root:localhost", caller_label="threading_error_test")
 
     @pytest.mark.asyncio
     async def test_command_as_reply_doesnt_cause_thread_error(self, tmp_path: Path) -> None:
@@ -9131,7 +9693,7 @@ class TestThreadingBehavior:
                     AsyncMock(return_value=thread_history_result([], is_full_history=False)),
                 ),
                 patch(
-                    "mindroom.matrix.conversation_cache.MatrixConversationCache.get_thread_messages",
+                    "mindroom.matrix.conversation_cache.MatrixConversationCache.get_dispatch_thread_history",
                     AsyncMock(return_value=thread_history_result([], is_full_history=True)),
                 ),
             ):
@@ -9247,11 +9809,11 @@ class TestThreadingBehavior:
                 ),
                 patch(
                     "mindroom.matrix.conversation_cache.MatrixConversationCache.get_dispatch_thread_history",
-                    AsyncMock(return_value=[]),
+                    AsyncMock(return_value=thread_history_result([], is_full_history=True)),
                 ),
                 patch(
                     "mindroom.matrix.conversation_cache.MatrixConversationCache.get_thread_history",
-                    AsyncMock(return_value=[]),
+                    AsyncMock(return_value=thread_history_result([], is_full_history=True)),
                 ),
             ):
                 # Process the command
@@ -9340,15 +9902,11 @@ class TestThreadingBehavior:
         with (
             patch(
                 "mindroom.matrix.conversation_cache.MatrixConversationCache.get_thread_history",
-                AsyncMock(return_value=[]),
-            ),
-            patch(
-                "mindroom.matrix.conversation_cache.MatrixConversationCache.get_thread_snapshot",
-                AsyncMock(return_value=thread_history_result([], is_full_history=False)),
+                AsyncMock(return_value=thread_history_result([], is_full_history=True)),
             ),
             patch(
                 "mindroom.matrix.conversation_cache.MatrixConversationCache.get_dispatch_thread_history",
-                AsyncMock(return_value=[]),
+                AsyncMock(return_value=thread_history_result([], is_full_history=True)),
             ),
             patch(
                 "mindroom.matrix.conversation_cache.MatrixConversationCache.get_dispatch_thread_snapshot",
@@ -9450,11 +10008,6 @@ class TestThreadingBehavior:
                 "mindroom.matrix.conversation_cache.MatrixConversationCache.get_latest_thread_event_id_if_needed",
                 AsyncMock(return_value="$latest:localhost"),
             ),
-            patch.object(
-                bot._conversation_cache,
-                "get_thread_snapshot",
-                AsyncMock(return_value=thread_history_result([], is_full_history=False)),
-            ),
             patch(
                 "mindroom.delivery_gateway.send_message_result",
                 AsyncMock(
@@ -9537,11 +10090,11 @@ class TestThreadingBehavior:
             ),
             patch(
                 "mindroom.matrix.conversation_cache.MatrixConversationCache.get_dispatch_thread_history",
-                AsyncMock(return_value=[]),
+                AsyncMock(return_value=thread_history_result([], is_full_history=True)),
             ),
             patch(
                 "mindroom.matrix.conversation_cache.MatrixConversationCache.get_thread_history",
-                AsyncMock(return_value=[]),
+                AsyncMock(return_value=thread_history_result([], is_full_history=True)),
             ),
         ):
             # Process the message

@@ -98,7 +98,6 @@ def _context_bot(tmp_path: Path, config: Config | None = None) -> AgentBot:
     bot.client = AsyncMock()
     bot.client.user_id = bot.agent_user.user_id
     bot.logger = MagicMock()
-    bot._conversation_resolver.derive_conversation_context = AsyncMock(return_value=(False, None, []))
     sync_bot_runtime_state(bot)
     return bot
 
@@ -182,11 +181,9 @@ async def test_extract_context_with_skip_mentions(tmp_path: Path) -> None:
     )
 
     # Extract context - should not detect mentions
-    context = await bot._conversation_resolver.extract_message_context_impl(
+    context = await bot._conversation_resolver.extract_message_context(
         room,
         event_with_skip,
-        full_history=True,
-        dispatch_safe=False,
         caller_label="skip_mentions_test",
     )
 
@@ -215,11 +212,9 @@ async def test_extract_context_with_skip_mentions(tmp_path: Path) -> None:
     with patch("mindroom.conversation_resolver.check_agent_mentioned") as mock_check:
         mock_check.return_value = (["email_agent"], True, False)
 
-        context = await bot._conversation_resolver.extract_message_context_impl(
+        context = await bot._conversation_resolver.extract_message_context(
             room,
             event_without_skip,
-            full_history=True,
-            dispatch_safe=False,
             caller_label="skip_mentions_test",
         )
 
@@ -256,11 +251,9 @@ async def test_extract_context_without_skip_metadata_detects_tool_mentions(tmp_p
         },
     )
 
-    context = await bot._conversation_resolver.extract_message_context_impl(
+    context = await bot._conversation_resolver.extract_message_context(
         room,
         event,
-        full_history=True,
-        dispatch_safe=False,
         caller_label="skip_mentions_test",
     )
 

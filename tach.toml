@@ -834,6 +834,7 @@ depends_on = [
     "mindroom.matrix.client_session",
     "mindroom.matrix.rooms",
     "mindroom.matrix.stale_stream_cleanup",
+    "mindroom.matrix.thread_diagnostics",
     "mindroom.matrix.users",
     "mindroom.matrix_identifiers",
     "mindroom.memory",
@@ -871,7 +872,8 @@ depends_on = [
     "mindroom.streaming",
     "mindroom.teams",
     "mindroom.thread_summary",
-    "mindroom.tool_system.runtime_context", "mindroom.tool_system.worker_routing",
+    "mindroom.tool_system.runtime_context",
+    "mindroom.tool_system.worker_routing",
 ]
 
 [[modules]]
@@ -1198,8 +1200,10 @@ depends_on = [
 [[modules]]
 path = "mindroom.matrix.cache.thread_reads"
 depends_on = [
+    "mindroom.constants",
     "mindroom.matrix.cache.thread_cache_helpers",
     "mindroom.matrix.cache.thread_history_result",
+    "mindroom.matrix.thread_diagnostics",
 ]
 
 [[modules]]
@@ -1495,7 +1499,7 @@ depends_on = ["mindroom.matrix.event_info", "mindroom.matrix.thread_membership"]
 
 [[modules]]
 path = "mindroom.matrix.thread_membership"
-depends_on = ["mindroom.matrix.event_info"]
+depends_on = ["mindroom.matrix.event_info", "mindroom.matrix.thread_diagnostics"]
 
 [[modules]]
 path = "mindroom.matrix.thread_bookkeeping"
@@ -1532,10 +1536,14 @@ depends_on = [
 path = "mindroom.conversation_resolver"
 depends_on = [
     "mindroom.constants",
+    "mindroom.dispatch_thread_context",
     "mindroom.hooks",
+    "mindroom.matrix.cache.thread_history_result",
+    "mindroom.matrix.cache.thread_reads",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.event_info",
     "mindroom.matrix.message_content",
+    "mindroom.matrix.thread_diagnostics",
     "mindroom.matrix.thread_membership",
     "mindroom.runtime_protocols",
 ]
@@ -1945,9 +1953,13 @@ depends_on = [
     "mindroom.commands.parsing",
     "mindroom.constants",
     "mindroom.delivery_gateway",
+    "mindroom.dispatch_replay_guard",
+    "mindroom.dispatch_source",
+    "mindroom.dispatch_thread_context",
     "mindroom.hooks",
     "mindroom.inbound_turn_normalizer",
     "mindroom.matrix.cache",
+    "mindroom.matrix.cache.thread_reads",
     "mindroom.matrix.event_info",
     "mindroom.matrix.message_content",
     "mindroom.matrix.rooms",
@@ -1955,6 +1967,29 @@ depends_on = [
     "mindroom.routing",
     "mindroom.turn_store",
     "mindroom.turn_policy",
+]
+
+[[modules]]
+path = "mindroom.dispatch_replay_guard"
+depends_on = [
+    "mindroom.commands.parsing",
+    "mindroom.dispatch_source",
+    "mindroom.matrix.event_info",
+]
+visibility = [
+    "mindroom.turn_controller",
+]
+
+[[modules]]
+path = "mindroom.dispatch_thread_context"
+depends_on = [
+    "mindroom.matrix.cache.thread_history_result",
+    "mindroom.matrix.thread_diagnostics",
+    "mindroom.message_target",
+]
+visibility = [
+    "mindroom.conversation_resolver",
+    "mindroom.turn_controller",
 ]
 
 [[modules]]
@@ -2250,13 +2285,6 @@ expose = [
     "AgentMessageSnapshotUnavailable",
     "ConversationEventCache",
     "EventCacheWriteCoordinator",
-    "THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC",
-    "THREAD_HISTORY_DEGRADED_DIAGNOSTIC",
-    "THREAD_HISTORY_ERROR_DIAGNOSTIC",
-    "THREAD_HISTORY_SOURCE_CACHE",
-    "THREAD_HISTORY_SOURCE_DIAGNOSTIC",
-    "THREAD_HISTORY_SOURCE_HOMESERVER",
-    "THREAD_HISTORY_SOURCE_STALE_CACHE",
     "ThreadCacheState",
     "ThreadHistoryResult",
     "normalize_nio_event_for_cache",
@@ -2302,9 +2330,24 @@ visibility = ["mindroom.matrix.conversation_cache"]
 exclusive = true
 
 [[interfaces]]
-expose = ["ThreadReadPolicy"]
+expose = ["ThreadReadMode", "ThreadReadPolicy"]
 from = ["mindroom.matrix.cache.thread_reads"]
-visibility = ["mindroom.matrix.conversation_cache"]
+visibility = ["mindroom.conversation_resolver", "mindroom.matrix.conversation_cache"]
+exclusive = true
+
+[[interfaces]]
+expose = [
+    "DispatchThreadContext",
+    "context_with_dispatch_thread_context",
+    "planning_history_for",
+    "planning_history_unavailable_for",
+]
+from = ["mindroom.dispatch_thread_context"]
+
+[[interfaces]]
+expose = ["DispatchContextResult"]
+from = ["mindroom.conversation_resolver"]
+visibility = ["mindroom.turn_controller"]
 exclusive = true
 
 [[interfaces]]
@@ -2436,7 +2479,6 @@ expose = [
     "fetch_dispatch_thread_history",
     "fetch_dispatch_thread_snapshot",
     "fetch_thread_history",
-    "fetch_thread_snapshot",
     "get_room_threads_page",
     "refresh_thread_history_from_source",
 ]

@@ -21,11 +21,13 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.conversation_resolver import MessageContext
-from mindroom.matrix.cache import ThreadHistoryResult
+from mindroom.matrix.cache import ThreadHistoryResult, thread_history_result
 from mindroom.matrix.cache.event_cache import ThreadCacheState
+from mindroom.matrix.cache.thread_reads import ThreadReadMode
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.thread_diagnostics import THREAD_HISTORY_DEGRADED_DIAGNOSTIC
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.streaming import StreamingResponse, send_streaming_response
@@ -39,6 +41,7 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     delivered_matrix_event,
+    dispatch_context_result,
     install_runtime_cache_support,
     install_send_response_mock,
     make_conversation_cache_mock,
@@ -667,8 +670,14 @@ class TestExtractMessageContextRoomMode:
         )
         bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
         bot.client = MagicMock()
+        thread_context = MagicMock(
+            is_thread=True,
+            thread_id="$thread123",
+            thread_history=[{"event_id": "$thread123"}],
+            requires_model_history_refresh=False,
+        )
         unwrap_extracted_collaborator(bot._conversation_resolver)._resolve_thread_context = AsyncMock(
-            return_value=(True, "$thread123", [{"event_id": "$thread123"}], False),
+            return_value=thread_context,
         )
 
         room = MagicMock(spec=nio.MatrixRoom)
@@ -778,37 +787,21 @@ class TestExtractMessageContextRoomMode:
             thread_history=[],
             mentioned_agents=[],
             has_non_agent_mentions=False,
-            requires_full_thread_history=True,
+            requires_model_history_refresh=True,
         )
-        bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=context)
+        bot._conversation_resolver.extract_dispatch_context = AsyncMock(
+            return_value=dispatch_context_result(context),
+        )
         bot._conversation_resolver.extract_message_context = AsyncMock(return_value=context)
-        bot._conversation_resolver.extract_message_context_impl = AsyncMock(return_value=context)
 
-        assert await bot._conversation_resolver.extract_dispatch_context(room, event) is context
-        assert await bot._conversation_resolver.extract_message_context(room, event, full_history=False) is context
-        assert (
-            await bot._conversation_resolver.extract_message_context_impl(
-                room,
-                event,
-                full_history=True,
-                dispatch_safe=False,
-                caller_label="thread_mode_test",
-            )
-            is context
-        )
+        dispatch_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
+        assert dispatch_result.context is context
+        assert await bot._conversation_resolver.extract_message_context(room, event) is context
 
         bot._conversation_resolver.extract_dispatch_context.assert_awaited_once_with(room, event)
         bot._conversation_resolver.extract_message_context.assert_awaited_once_with(
             room,
             event,
-            full_history=False,
-        )
-        bot._conversation_resolver.extract_message_context_impl.assert_awaited_once_with(
-            room,
-            event,
-            full_history=True,
-            dispatch_safe=False,
-            caller_label="thread_mode_test",
         )
 
     def test_hot_reloaded_bot_uses_updated_thread_mode_without_restart(
@@ -914,6 +907,105 @@ class TestExtractMessageContextRoomMode:
         assert target.reply_to_event_id == "$reply-event:localhost"
         assert target.resolved_thread_id is None
         assert target.session_id == create_session_id("!room:localhost", None)
+
+    def test_build_message_target_new_thread_root_uses_live_event_without_history_proof(
+        self,
+        assistant_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """New root replies should route from the live event without thread-history proof."""
+        config = _runtime_bound_config(
+            Config(
+                agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
+        bot._conversation_cache.get_thread_history = AsyncMock(
+            side_effect=AssertionError("new thread root targeting must not fetch thread history"),
+        )
+
+        target = bot._conversation_resolver.build_message_target(
+            room_id="!room:localhost",
+            thread_id=None,
+            reply_to_event_id="$new-root:localhost",
+            event_source={
+                "content": {"body": "voice note", "msgtype": "m.audio"},
+                "event_id": "$new-root:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": "!room:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        assert target.reply_to_event_id == "$new-root:localhost"
+        assert target.source_thread_id is None
+        assert target.resolved_thread_id == "$new-root:localhost"
+        assert target.session_id == create_session_id("!room:localhost", "$new-root:localhost")
+        bot._conversation_cache.get_thread_history.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_extract_message_context_keeps_full_hydration_required_for_degraded_history(
+        self,
+        assistant_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Degraded full-history reads should remain visible to later prompt preparation."""
+        config = _runtime_bound_config(
+            Config(
+                agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
+        bot.client = AsyncMock()
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "follow up",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread-root:localhost"},
+                },
+                "event_id": "$event:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+            },
+        )
+        degraded_history = ThreadHistoryResult(
+            [],
+            is_full_history=False,
+            diagnostics={THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True},
+        )
+
+        with patch.object(
+            bot._conversation_cache,
+            "get_dispatch_thread_history",
+            AsyncMock(return_value=degraded_history),
+        ):
+            context_result = await bot._conversation_resolver.extract_dispatch_context(
+                room,
+                event,
+                caller_label="dispatch_hydration",
+            )
+            context = context_result.context
+
+        assert context.is_thread is True
+        assert context.thread_id == "$thread-root:localhost"
+        assert context.thread_history is degraded_history
+        assert context.requires_model_history_refresh is True
 
     @pytest.mark.parametrize("relation_type", ["m.replace", "m.annotation", "m.reference"])
     def test_build_message_target_plain_reply_relation_does_not_infer_thread_identity(
@@ -1167,8 +1259,8 @@ class TestCommandThreadContextRoomMode:
         bot.client = AsyncMock()
         bot._send_response = AsyncMock(return_value="$reply")
         install_send_response_mock(bot, bot._send_response)
-        unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
-            return_value=(False, None, []),
+        unwrap_extracted_collaborator(bot._conversation_resolver).resolve_dispatch_target = AsyncMock(
+            return_value=MessageTarget.resolve("!room:localhost", None, "$event123"),
         )
 
         room = MagicMock(spec=nio.MatrixRoom)
@@ -1205,6 +1297,69 @@ class TestCommandThreadContextRoomMode:
 
         assert mock_schedule.await_args.kwargs["thread_id"] is None
         assert bot._send_response.await_args.args[3] is None
+
+    @pytest.mark.asyncio
+    async def test_router_command_uses_stable_dispatch_target_without_deriving_context(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Dispatch commands should reuse the finalized target instead of re-resolving thread context."""
+        config = _runtime_bound_config(
+            Config(
+                router=RouterConfig(model="default"),
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+            ),
+            tmp_path,
+        )
+        router_user = AgentMatrixUser(
+            agent_name=ROUTER_AGENT_NAME,
+            password=TEST_PASSWORD,
+            display_name="Router",
+            user_id="@mindroom_router:localhost",
+        )
+        bot = _agent_bot(config=config, agent_user=router_user, storage_path=tmp_path)
+        bot.client = AsyncMock()
+        bot._send_response = AsyncMock(return_value="$reply")
+        install_send_response_mock(bot, bot._send_response)
+        resolve_target = AsyncMock(side_effect=AssertionError("command dispatch re-resolved target"))
+        unwrap_extracted_collaborator(bot._conversation_resolver).resolve_dispatch_target = resolve_target
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        event = nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$event123",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "content": {"msgtype": "m.text", "body": "!schedule in 5 minutes ping"},
+            },
+        )
+        command = Command(
+            type=CommandType.SCHEDULE,
+            args={"full_text": "in 5 minutes ping"},
+            raw_text="!schedule in 5 minutes ping",
+        )
+        stable_target = MessageTarget.resolve("!room:localhost", "$stable_thread", "$event123")
+
+        with (
+            patch("mindroom.commands.handler.check_agent_mentioned", return_value=([], False, False)),
+            patch(
+                "mindroom.commands.handler.schedule_task",
+                new_callable=AsyncMock,
+                return_value=("task123", "scheduled"),
+            ) as mock_schedule,
+        ):
+            await bot._turn_controller._execute_command(
+                room=room,
+                event=event,
+                requester_user_id="@user:localhost",
+                command=command,
+                target=stable_target,
+            )
+
+        resolve_target.assert_not_awaited()
+        assert mock_schedule.await_args.kwargs["thread_id"] == "$stable_thread"
+        assert bot._send_response.await_args.args[3] == "$stable_thread"
 
 
 class TestExtractedModuleLoggerRebinding:
@@ -1389,18 +1544,19 @@ class TestExtractedModuleLoggerRebinding:
         bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
         bot.client = AsyncMock()
         sync_bot_runtime_state(bot)
-        bot._conversation_cache.get_dispatch_thread_history = AsyncMock(return_value=[])
+        bot._conversation_cache.get_strict_thread_history = AsyncMock(
+            return_value=thread_history_result([], is_full_history=True),
+        )
 
         asyncio.run(
             unwrap_extracted_collaborator(bot._conversation_resolver).fetch_thread_history(
-                bot.client,
                 "!room:localhost",
                 "$threadroot",
             ),
         )
 
-        bot._conversation_cache.get_dispatch_thread_history.assert_awaited_once()
-        assert bot._conversation_cache.get_dispatch_thread_history.await_args.args == (
+        bot._conversation_cache.get_strict_thread_history.assert_awaited_once()
+        assert bot._conversation_cache.get_strict_thread_history.await_args.args == (
             "!room:localhost",
             "$threadroot",
         )
@@ -1451,7 +1607,7 @@ class TestExtractedModuleLoggerRebinding:
         client = AsyncMock()
         with patch(
             "mindroom.matrix.conversation_cache.fetch_thread_history",
-            new=AsyncMock(return_value=[]),
+            new=AsyncMock(return_value=thread_history_result([], is_full_history=True)),
         ) as fetch_thread_history_mock:
             bot.client = client
             await bot._conversation_cache.get_thread_history(
@@ -1523,17 +1679,11 @@ class TestExtractedModuleLoggerRebinding:
 
         bot.client = AsyncMock()
         async with bot._conversation_cache.turn_scope():
-            snapshot_history = await bot._conversation_cache.get_thread_snapshot(
-                "!room:localhost",
-                "$threadroot",
-            )
             full_history = await bot._conversation_cache.get_thread_history(
                 "!room:localhost",
                 "$threadroot",
             )
 
-        assert snapshot_history.is_full_history is False
-        assert [message.event_id for message in snapshot_history] == ["$threadroot", "$reply"]
         assert full_history.is_full_history is True
         assert [message.event_id for message in full_history] == ["$threadroot", "$reply"]
 
@@ -1579,24 +1729,23 @@ class TestExtractedModuleLoggerRebinding:
         bot._conversation_resolver.deps.conversation_cache.get_thread_id_for_event = AsyncMock(
             side_effect=lambda _room_id, event_id: "$threadroot" if event_id == "$reply-seed:localhost" else None,
         )
-        thread_id = await bot._conversation_resolver._explicit_thread_id_for_event(
+        thread_lookup = await bot._conversation_resolver._explicit_thread_id_for_event(
             room.room_id,
             event.event_id,
             EventInfo.from_event(event.source),
-            full_history=False,
-            dispatch_safe=True,
+            mode=ThreadReadMode.DISPATCH_SNAPSHOT,
             caller_label="thread_mode_test",
         )
 
-        assert thread_id == "$threadroot"
+        assert thread_lookup.thread_id == "$threadroot"
 
     @pytest.mark.asyncio
-    async def test_direct_thread_dispatch_preview_still_requires_full_thread_history(
+    async def test_direct_thread_dispatch_uses_bounded_full_history(
         self,
         assistant_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Only explicit thread events should defer full history after snapshot preview."""
+        """Dispatch policy context should use the bounded full read instead of a partial snapshot."""
         config = _runtime_bound_config(
             Config(
                 agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
@@ -1631,7 +1780,7 @@ class TestExtractedModuleLoggerRebinding:
                 },
             },
         )
-        preview_snapshot = ThreadHistoryResult(
+        dispatch_history = ThreadHistoryResult(
             [
                 ResolvedVisibleMessage.synthetic(
                     sender="@user:localhost",
@@ -1644,17 +1793,16 @@ class TestExtractedModuleLoggerRebinding:
                     event_id="$thread-msg:localhost",
                 ),
             ],
-            is_full_history=False,
+            is_full_history=True,
         )
 
-        bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(return_value=preview_snapshot)
+        bot._conversation_cache.get_dispatch_thread_history = AsyncMock(return_value=dispatch_history)
+        bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+            side_effect=AssertionError("dispatch planning should use bounded full history"),
+        )
 
-        with patch.object(
-            bot._conversation_cache,
-            "get_thread_snapshot",
-            AsyncMock(side_effect=AssertionError("dispatch preview should use strict dispatch snapshot reads")),
-        ):
-            context = await bot._conversation_resolver.extract_dispatch_context(room, event)
+        context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
+        context = context_result.context
 
         assert context.is_thread is True
         assert context.thread_id == "$thread-root:localhost"
@@ -1662,12 +1810,13 @@ class TestExtractedModuleLoggerRebinding:
             "$thread-root:localhost",
             "$thread-msg:localhost",
         ]
-        assert context.requires_full_thread_history is True
-        bot._conversation_cache.get_dispatch_thread_snapshot.assert_awaited_once_with(
+        assert context.requires_model_history_refresh is False
+        bot._conversation_cache.get_dispatch_thread_history.assert_awaited_once_with(
             room.room_id,
             "$thread-root:localhost",
             caller_label="dispatch_context",
         )
+        bot._conversation_cache.get_dispatch_thread_snapshot.assert_not_awaited()
 
 
 class TestConversationCacheArchitecture:

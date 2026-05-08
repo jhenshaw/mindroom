@@ -11,7 +11,6 @@ from mindroom.commands.parsing import Command, CommandType, get_command_help, ge
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.handled_turns import HandledTurnState
 from mindroom.logging_config import get_logger
-from mindroom.matrix.event_info import EventInfo
 from mindroom.scheduling import (
     SchedulingRuntime,
     cancel_all_scheduled_tasks,
@@ -23,14 +22,13 @@ from mindroom.scheduling import (
 from mindroom.thread_utils import check_agent_mentioned, get_configured_agents_for_room
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import Awaitable, Callable
 
     import nio
     import structlog
 
     from mindroom.config.main import Config
     from mindroom.hooks import HookMatrixAdmin
-    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol, ConversationEventCache
     from mindroom.message_target import MessageTarget
     from mindroom.tool_system.plugins import PluginReloadResult
@@ -60,18 +58,16 @@ class _CommandEvent(Protocol):
     source: dict[str, Any]
 
 
-class _DeriveConversationContext(Protocol):
-    """Callable signature for deriving conversation thread context."""
+class _CommandResponseSender(Protocol):
+    """Send one command response to the stable command target."""
 
-    async def __call__(
+    def __call__(
         self,
-        room_id: str,
-        event_info: EventInfo,
+        response_text: str,
         *,
-        event_id: str | None = None,
-        caller_label: str = "unknown",
-    ) -> tuple[bool, str | None, Sequence[ResolvedVisibleMessage]]:
-        """Return whether one event is threaded plus its thread id and history."""
+        skip_mentions: bool = False,
+    ) -> Awaitable[str | None]:
+        """Send a command response."""
 
 
 @dataclass(frozen=True)
@@ -82,12 +78,11 @@ class CommandHandlerContext:
     config: Config
     runtime_paths: RuntimePaths
     logger: structlog.stdlib.BoundLogger
-    derive_conversation_context: _DeriveConversationContext
     conversation_cache: ConversationCacheProtocol
     event_cache: ConversationEventCache
-    build_message_target: Callable[..., MessageTarget]
+    stable_target: MessageTarget
     record_handled_turn: Callable[[HandledTurnState], None]
-    send_response: Callable[..., Awaitable[str | None]]
+    send_response: _CommandResponseSender
     reload_plugins: Callable[[], Awaitable[PluginReloadResult]] | None = None
     matrix_admin: HookMatrixAdmin | None = None
 
@@ -196,22 +191,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
     """Dispatch chat commands using injected bot context."""
     context.logger.info("Handling command", command_type=command.type.value)
 
-    event_info = EventInfo.from_event(event.source)
-    _, thread_id, _thread_history = await context.derive_conversation_context(
-        room.room_id,
-        event_info,
-        event_id=event.event_id,
-        caller_label="command_context",
-    )
-
-    # Commands/tools that persist conversation context should use the same
-    # thread-root policy as outgoing replies.
-    effective_thread_id = context.build_message_target(
-        room_id=room.room_id,
-        thread_id=thread_id,
-        reply_to_event_id=event.event_id,
-        event_source=event.source,
-    ).resolved_thread_id
+    effective_thread_id = context.stable_target.resolved_thread_id
 
     response_text = ""
 
@@ -301,11 +281,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
         if change_info:
             # Send the preview message
             raw_response_event_id = await context.send_response(
-                room.room_id,
-                event.event_id,
                 response_text,
-                effective_thread_id,
-                reply_to_event=event,
                 skip_mentions=True,
             )
             response_event_id = _normalized_response_event_id(raw_response_event_id)
@@ -356,11 +332,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
 
     if response_text:
         raw_response_event_id = await context.send_response(
-            room.room_id,
-            event.event_id,
             response_text,
-            effective_thread_id,
-            reply_to_event=event,
             skip_mentions=True,
         )
         context.record_handled_turn(

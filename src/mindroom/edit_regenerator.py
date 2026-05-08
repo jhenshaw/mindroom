@@ -99,7 +99,6 @@ class EditRegenerator:
         if context.thread_id == conversation_target.resolved_thread_id:
             return context
         thread_history = await self.deps.resolver.fetch_thread_history(
-            self._client(),
             room.room_id,
             conversation_target.resolved_thread_id,
             caller_label="edit_regeneration_context",
@@ -112,7 +111,7 @@ class EditRegenerator:
             mentioned_agents=context.mentioned_agents,
             has_non_agent_mentions=context.has_non_agent_mentions,
             replay_guard_history=thread_history,
-            requires_full_thread_history=context.requires_full_thread_history,
+            requires_model_history_refresh=context.requires_model_history_refresh,
         )
 
     async def handle_message_edit(  # noqa: C901, PLR0911, PLR0912, PLR0915
