@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     display_name="Browser",
     description=(
         "OpenClaw-style browser control (status/start/stop/profiles/tabs/open/focus/close/"
-        "snapshot/screenshot/navigate/console/pdf/upload/dialog/act)"
+        "snapshot/screenshot/navigate/console/pdf/upload/dialog/act/help/actions)"
     ),
     category=ToolCategory.RESEARCH,
     status=ToolStatus.AVAILABLE,
@@ -38,7 +38,10 @@ if TYPE_CHECKING:
             label="Output Directory",
             type="text",
             required=False,
-            description="Optional directory for browser screenshots, PDFs, and downloads.",
+            description=(
+                "Optional directory for browser screenshots, PDFs, and downloads. "
+                "Defaults to the active storage path's browser/ directory."
+            ),
         ),
     ],
     function_names=("browser",),
