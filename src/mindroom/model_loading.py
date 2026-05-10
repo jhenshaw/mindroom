@@ -220,6 +220,7 @@ def configure_model_for_compaction(model: Model) -> Model:
         return model
     model.cache_system_prompt = False
     model.extended_cache_time = False
+    model.thinking = None
     model.max_tokens = (
         min(model.max_tokens, MINDROOM_COMPACTION_SUMMARY_MAX_TOKENS)
         if model.max_tokens

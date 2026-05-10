@@ -318,6 +318,7 @@ def test_configure_model_for_compaction_disables_reply_oriented_claude_settings(
         cache_system_prompt=True,
         extended_cache_time=True,
         max_tokens=8192,
+        thinking={"type": "enabled", "budget_tokens": 8192},
         timeout=300.0,
         client_params={"max_retries": 2, "custom": "keep"},
     )
@@ -327,6 +328,7 @@ def test_configure_model_for_compaction_disables_reply_oriented_claude_settings(
     assert configured is model
     assert model.cache_system_prompt is False
     assert model.extended_cache_time is False
+    assert model.thinking is None
     assert model.max_tokens == MINDROOM_COMPACTION_SUMMARY_MAX_TOKENS
     assert model.timeout == MINDROOM_COMPACTION_PROVIDER_TIMEOUT_SECONDS
     assert model.client_params == {"max_retries": 0, "custom": "keep"}
