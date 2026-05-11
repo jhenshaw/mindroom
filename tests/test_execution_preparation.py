@@ -9,10 +9,9 @@ from defusedxml.ElementTree import fromstring
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.execution_preparation import _fallback_static_token_budget
 from mindroom.prepared_conversation_chain import (
-    build_matrix_prompt_with_thread_history,
+    _build_matrix_prompt_with_history,
     build_thread_history_chain,
     build_unseen_context_chain,
-    collect_history_messages,
 )
 from tests.conftest import make_visible_message
 
@@ -22,6 +21,29 @@ if TYPE_CHECKING:
     from agno.models.message import Message
 
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+
+
+def _build_matrix_prompt_with_thread_history(
+    prompt: str,
+    thread_history: Sequence[ResolvedVisibleMessage] | None = None,
+    *,
+    max_message_length: int | None = None,
+) -> str:
+    history_messages = []
+    for msg in thread_history or []:
+        body = msg.body
+        if not body:
+            continue
+        if max_message_length is not None and len(body) > max_message_length:
+            body = f"{body[: max_message_length - 1]}…" if max_message_length > 1 else "…"
+        history_messages.append((msg.sender or "Unknown", body))
+    return _build_matrix_prompt_with_history(
+        prompt,
+        history_messages,
+        header="Previous conversation in this thread:",
+        prompt_intro="Current message:\n",
+        current_sender=None,
+    )
 
 
 def _build_unseen_context_messages(
@@ -77,82 +99,6 @@ def test_fallback_thread_history_caps_long_messages_without_dropping_them() -> N
     assert chain.messages[1].content == "Current request"
 
 
-def test_collect_history_messages_keeps_visible_body_only() -> None:
-    """History collection should ignore Matrix tool-trace metadata and keep only the visible body."""
-    messages = [
-        make_visible_message(
-            sender="@alice:localhost",
-            body="Worked on it",
-            content={"io.mindroom.tool_trace": {"version": 2, "events": [{"tool_name": "run_shell_command"}]}},
-        ),
-    ]
-
-    collected = collect_history_messages(
-        messages,
-        max_messages=None,
-        max_message_length=None,
-        missing_sender_label=None,
-    )
-
-    assert collected == [("@alice:localhost", "Worked on it")]
-
-
-def test_collect_history_messages_leaves_no_trace_messages_unchanged() -> None:
-    """No-trace history collection should remain byte-identical to the prior output."""
-    messages = [make_visible_message(sender="@alice:localhost", body="Earlier context")]
-
-    collected = collect_history_messages(
-        messages,
-        max_messages=None,
-        max_message_length=None,
-        missing_sender_label=None,
-    )
-
-    assert collected == [("@alice:localhost", "Earlier context")]
-
-
-def test_collect_history_messages_drops_tool_only_message() -> None:
-    """Tool-only metadata should not be promoted into visible history context."""
-    messages = [
-        make_visible_message(
-            sender="@alice:localhost",
-            content={"io.mindroom.tool_trace": {"version": 2, "events": [{"tool_name": "run_shell_command"}]}},
-        ),
-    ]
-
-    collected = collect_history_messages(
-        messages,
-        max_messages=None,
-        max_message_length=None,
-        missing_sender_label=None,
-    )
-
-    assert collected == []
-
-
-def test_collect_history_messages_truncates_visible_body() -> None:
-    """Length caps should apply only to the visible body content."""
-    messages = [
-        make_visible_message(
-            sender="@alice:localhost",
-            body="ok" * 20,
-            content={"io.mindroom.tool_trace": {"version": 2, "events": [{"tool_name": "run_shell_command"}]}},
-        ),
-    ]
-
-    collected = collect_history_messages(
-        messages,
-        max_messages=None,
-        max_message_length=20,
-        missing_sender_label=None,
-    )
-
-    assert collected[0][0] == "@alice:localhost"
-    assert collected[0][1].startswith("okok")
-    assert collected[0][1].endswith("…")
-    assert len(collected[0][1]) == 20
-
-
 def test_build_matrix_prompt_with_thread_history_truncates_visible_body_to_max_length() -> None:
     """Rendered Matrix history bodies should respect max_message_length using only visible text."""
     thread_history = [
@@ -163,7 +109,7 @@ def test_build_matrix_prompt_with_thread_history_truncates_visible_body_to_max_l
         ),
     ]
 
-    prompt = build_matrix_prompt_with_thread_history(
+    prompt = _build_matrix_prompt_with_thread_history(
         "Follow-up",
         thread_history,
         max_message_length=200,

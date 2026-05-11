@@ -345,7 +345,7 @@ async def prepare_agent_execution_context(
     )
 
 
-async def prepare_bound_team_execution_context(
+async def _prepare_bound_team_execution_context(
     *,
     scope_context: ScopeSessionContext | None,
     agents: list[Agent],
@@ -459,7 +459,7 @@ async def prepare_bound_team_run_context(
         team=team,
         entity_name=entity_name,
     )
-    prepared_execution = await prepare_bound_team_execution_context(
+    prepared_execution = await _prepare_bound_team_execution_context(
         scope_context=scope_context,
         agents=agents,
         team=team,

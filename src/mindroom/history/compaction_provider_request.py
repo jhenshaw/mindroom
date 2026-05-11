@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Awaitable, Callable, Sequence
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -118,6 +119,8 @@ def _agent_includes_session_summary(agent: Agent, session: AgentSession) -> bool
 
 
 def _team_includes_session_summary(team: Team, session: TeamSession) -> bool:
+    # Agno Team 2.5.13 does not expose Agent.build_context; team summaries are
+    # controlled by add_session_summary_to_context and custom system messages.
     return (
         _session_has_summary_text(session) and bool(team.add_session_summary_to_context) and team.system_message is None
     )
@@ -212,5 +215,9 @@ def _estimate_prepared_tool_definition_tokens(
 
 def _synthetic_compaction_run_id(summary_request: CompactionSummaryRequest) -> str:
     if summary_request.included_run_ids:
-        return "+".join(summary_request.included_run_ids)
+        joined = "+".join(summary_request.included_run_ids)
+        if len(joined) <= 200:
+            return joined
+        digest = hashlib.sha256(joined.encode()).hexdigest()[:16]
+        return f"compaction-summary-{digest}"
     return f"compaction-summary-{uuid4()}"

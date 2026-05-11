@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -39,7 +39,7 @@ from defusedxml.ElementTree import fromstring
 from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.agents import create_agent
 from mindroom.ai import _prepare_agent_and_prompt
-from mindroom.background_tasks import _get_background_task_count, wait_for_background_tasks
+from mindroom.background_tasks import _background_tasks, wait_for_background_tasks
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
@@ -51,21 +51,21 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.execution_preparation import (
-    PreparedExecutionContext,
+    _prepare_bound_team_execution_context,
+    _PreparedExecutionContext,
     prepare_agent_execution_context,
-    prepare_bound_team_execution_context,
     prepare_bound_team_run_context,
 )
 from mindroom.history import PreparedHistoryState, prepare_history_for_run
 from mindroom.history.compaction import (
     _compaction_summary_request_model,
+    _effective_summary_input_budget_tokens,
     _emit_compaction_hook,
     _generate_compaction_summary,
     _generate_compaction_summary_with_retry,
     _persist_compaction_progress,
     _rewrite_working_session_for_compaction,
     compact_scope_history,
-    effective_summary_input_budget_tokens,
     estimate_prompt_visible_history_tokens,
     estimate_session_summary_tokens,
 )
@@ -77,12 +77,12 @@ from mindroom.history.compaction_provider_request import (
 )
 from mindroom.history.policy import classify_compaction_decision, resolve_history_execution_plan
 from mindroom.history.runtime import (
+    _plan_replay_that_fits,
     apply_replay_plan,
     estimate_preparation_static_tokens_for_team,
     finalize_history_preparation,
     open_bound_scope_session_context,
     open_scope_session_context,
-    plan_replay_that_fits,
     prepare_bound_scope_history,
     prepare_scope_history,
 )
@@ -114,15 +114,15 @@ from mindroom.hooks import (
     build_hook_matrix_admin,
     hook,
 )
-from mindroom.hooks.types import RESERVED_EVENT_NAMESPACES, default_timeout_ms_for_event, validate_event_name
+from mindroom.hooks.types import _RESERVED_EVENT_NAMESPACES, default_timeout_ms_for_event, validate_event_name
 from mindroom.memory import MemoryPromptParts
 from mindroom.prepared_conversation_chain import (
     CompactionSummaryRequest,
-    PreparedConversationChain,
+    _build_matrix_prompt_with_history,
+    _build_warm_cache_compaction_summary_request,
+    _PreparedConversationChain,
     build_compaction_summary_request,
-    build_matrix_prompt_with_thread_history,
     build_persisted_run_chain,
-    build_warm_cache_compaction_summary_request,
     estimate_history_messages_tokens,
     strip_stale_anthropic_replay_fields,
 )
@@ -132,6 +132,9 @@ from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.vertex_claude_prompt_cache import install_vertex_claude_prompt_cache_hook
 from tests.conftest import bind_runtime_paths, make_conversation_cache_mock, make_event_cache_mock, make_visible_message
+
+if TYPE_CHECKING:
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 _DEFAULT_TEST_COMPACTION = CompactionConfig()
 
@@ -185,7 +188,7 @@ def _summary_messages(content: str = "Current prompt") -> list[Message]:
 
 def test_prepare_scope_history_boundary_does_not_accept_execution_identity() -> None:
     assert "execution_identity" not in inspect.signature(prepare_agent_execution_context).parameters
-    assert "execution_identity" not in inspect.signature(prepare_bound_team_execution_context).parameters
+    assert "execution_identity" not in inspect.signature(_prepare_bound_team_execution_context).parameters
     assert "execution_identity" not in inspect.signature(prepare_bound_team_run_context).parameters
     assert "execution_identity" not in inspect.signature(prepare_bound_scope_history).parameters
     assert "execution_identity" not in inspect.signature(prepare_scope_history).parameters
@@ -396,6 +399,22 @@ def _session(
         summary=summary,
         created_at=1,
         updated_at=1,
+    )
+
+
+def _build_matrix_prompt_with_thread_history(
+    prompt: str,
+    thread_history: Sequence[ResolvedVisibleMessage] | None = None,
+    *,
+    current_sender: str | None = None,
+) -> str:
+    history_messages = [(msg.sender or "Unknown", msg.body) for msg in thread_history or [] if msg.body]
+    return _build_matrix_prompt_with_history(
+        prompt,
+        history_messages,
+        header="Previous conversation in this thread:",
+        prompt_intro="Current message:\n",
+        current_sender=current_sender,
     )
 
 
@@ -1263,14 +1282,14 @@ async def test_agent_compaction_provider_request_uses_previous_summary_from_syst
         "session-1",
         summary=SessionSummary(summary="Existing durable summary", updated_at=datetime.now(UTC)),
     )
-    chain = PreparedConversationChain(
+    chain = _PreparedConversationChain(
         messages=(Message(role="user", content="New work"), Message(role="assistant", content="New result")),
         rendered_text="New work\nNew result",
         source="persisted_runs",
         source_run_ids=("run-1",),
         estimated_tokens=10,
     )
-    summary_request = build_warm_cache_compaction_summary_request(
+    summary_request = _build_warm_cache_compaction_summary_request(
         chain,
         previous_summary="Existing durable summary",
     )
@@ -1291,14 +1310,14 @@ async def test_agent_compaction_provider_request_keeps_previous_summary_with_cus
         "session-1",
         summary=SessionSummary(summary="Existing durable summary", updated_at=datetime.now(UTC)),
     )
-    chain = PreparedConversationChain(
+    chain = _PreparedConversationChain(
         messages=(Message(role="user", content="New work"), Message(role="assistant", content="New result")),
         rendered_text="New work\nNew result",
         source="persisted_runs",
         source_run_ids=("run-1",),
         estimated_tokens=10,
     )
-    summary_request = build_warm_cache_compaction_summary_request(
+    summary_request = _build_warm_cache_compaction_summary_request(
         chain,
         previous_summary="Existing durable summary",
     )
@@ -1462,11 +1481,11 @@ async def test_compaction_summary_rebuilds_chunk_for_provider_request_overhead()
 
 
 def test_effective_summary_input_budget_caps_per_chunk() -> None:
-    assert effective_summary_input_budget_tokens(100_000, 256_000) == 32_000
-    assert effective_summary_input_budget_tokens(10_000, 256_000) == 10_000
-    assert effective_summary_input_budget_tokens(100_000, 12_000) == 3_000
-    assert effective_summary_input_budget_tokens(1_500, 1_000) == 1_500
-    assert effective_summary_input_budget_tokens(100_000, None) == 100_000
+    assert _effective_summary_input_budget_tokens(100_000, 256_000) == 32_000
+    assert _effective_summary_input_budget_tokens(10_000, 256_000) == 10_000
+    assert _effective_summary_input_budget_tokens(100_000, 12_000) == 3_000
+    assert _effective_summary_input_budget_tokens(1_500, 1_000) == 1_500
+    assert _effective_summary_input_budget_tokens(100_000, None) == 100_000
 
 
 @pytest.mark.asyncio
@@ -1686,7 +1705,7 @@ async def test_compaction_timeout_cleanup_detaches_after_grace_window() -> None:
     await asyncio.wait_for(model.started.wait(), timeout=0.1)
     await asyncio.wait_for(model.cancelled.wait(), timeout=0.1)
     await asyncio.sleep(0)
-    assert _get_background_task_count() == 0
+    assert len(_background_tasks) == 0
     model.release_cleanup.set()
     await asyncio.wait_for(model.finished.wait(), timeout=0.2)
     await wait_for_background_tasks(timeout=0.1)
@@ -1762,7 +1781,7 @@ def test_compaction_hook_events_are_registered() -> None:
     assert EVENT_COMPACTION_AFTER in BUILTIN_EVENT_NAMES
     assert validate_event_name(EVENT_COMPACTION_BEFORE) == EVENT_COMPACTION_BEFORE
     assert validate_event_name(EVENT_COMPACTION_AFTER) == EVENT_COMPACTION_AFTER
-    assert "compaction" in RESERVED_EVENT_NAMESPACES
+    assert "compaction" in _RESERVED_EVENT_NAMESPACES
     assert default_timeout_ms_for_event(EVENT_COMPACTION_BEFORE) == 15000
     assert default_timeout_ms_for_event(EVENT_COMPACTION_AFTER) == 5000
 
@@ -3563,7 +3582,7 @@ def test_compaction_summary_request_oversized_tool_call_run_uses_plain_budgeted_
 
 
 def test_warm_cache_compaction_request_rejects_dangling_tool_calls_before_summary_instruction() -> None:
-    chain = PreparedConversationChain(
+    chain = _PreparedConversationChain(
         messages=(
             Message(
                 role="assistant",
@@ -3580,11 +3599,11 @@ def test_warm_cache_compaction_request_rejects_dangling_tool_calls_before_summar
     )
 
     with pytest.raises(ValueError, match="tool result adjacency"):
-        build_warm_cache_compaction_summary_request(chain, previous_summary=None)
+        _build_warm_cache_compaction_summary_request(chain, previous_summary=None)
 
 
 def test_warm_cache_compaction_request_rejects_interrupted_tool_result_adjacency() -> None:
-    chain = PreparedConversationChain(
+    chain = _PreparedConversationChain(
         messages=(
             Message(
                 role="assistant",
@@ -3605,7 +3624,7 @@ def test_warm_cache_compaction_request_rejects_interrupted_tool_result_adjacency
     )
 
     with pytest.raises(ValueError, match="tool result adjacency"):
-        build_warm_cache_compaction_summary_request(chain, previous_summary=None)
+        _build_warm_cache_compaction_summary_request(chain, previous_summary=None)
 
 
 def test_compaction_summary_request_oversized_run_preserves_messages_before_tool_schema() -> None:
@@ -3730,7 +3749,7 @@ def test_warm_cache_compaction_request_preserves_prepared_chain_prefix() -> None
     )
 
     chain = build_persisted_run_chain([run], history_settings=history_settings)
-    request = build_warm_cache_compaction_summary_request(
+    request = _build_warm_cache_compaction_summary_request(
         chain,
         previous_summary="Prior summary",
     )
@@ -3768,7 +3787,7 @@ def test_warm_cache_compaction_request_preserves_prepared_anthropic_prefix_field
         ),
     )
 
-    request = build_warm_cache_compaction_summary_request(chain, previous_summary=None)
+    request = _build_warm_cache_compaction_summary_request(chain, previous_summary=None)
     assistant = request.messages[1]
 
     assert request.messages[:-1] == request.chain.messages
@@ -3866,14 +3885,14 @@ async def test_agent_compaction_provider_request_does_not_mutate_live_replay_set
     agent.num_history_messages = 3
     agent.max_tool_calls_from_history = 1
     session = _session("session-1")
-    chain = PreparedConversationChain(
+    chain = _PreparedConversationChain(
         messages=(Message(role="user", content="Past message"),),
         rendered_text="Past message",
         source="persisted_runs",
         source_run_ids=("run-1",),
         estimated_tokens=10,
     )
-    summary_request = build_warm_cache_compaction_summary_request(chain, previous_summary=None)
+    summary_request = _build_warm_cache_compaction_summary_request(chain, previous_summary=None)
     started = asyncio.Event()
     release = asyncio.Event()
 
@@ -5373,7 +5392,7 @@ def test_resolve_runtime_model_uses_room_override_for_team(
         ),
         runtime_paths,
     )
-    monkeypatch.setattr("mindroom.matrix.rooms.get_room_alias_from_id", lambda *_args: "lobby")
+    monkeypatch.setattr("mindroom.matrix.state.get_room_alias_from_id", lambda *_args: "lobby")
 
     runtime_model = config.resolve_runtime_model(
         entity_name="team_123",
@@ -5402,7 +5421,7 @@ def test_resolve_runtime_model_uses_room_override_for_agent(
         ),
         runtime_paths,
     )
-    monkeypatch.setattr("mindroom.matrix.rooms.get_room_alias_from_id", lambda *_args: "lobby")
+    monkeypatch.setattr("mindroom.matrix.state.get_room_alias_from_id", lambda *_args: "lobby")
 
     runtime_model = config.resolve_runtime_model(
         entity_name="test_agent",
@@ -5535,7 +5554,7 @@ def test_plan_replay_that_fits_reduces_replay_for_non_authored_scope(tmp_path: P
         ],
     )
 
-    replay_plan = plan_replay_that_fits(
+    replay_plan = _plan_replay_that_fits(
         session=session,
         scope=HistoryScope(kind="agent", scope_id="test_agent"),
         history_settings=ResolvedHistorySettings(
@@ -5558,7 +5577,7 @@ def test_build_matrix_prompt_with_thread_history_preserves_verbatim_bodies_in_cd
         ),
     ]
 
-    prompt = build_matrix_prompt_with_thread_history(
+    prompt = _build_matrix_prompt_with_thread_history(
         "Follow-up",
         thread_history,
         current_sender="@bob:localhost",
@@ -5602,7 +5621,7 @@ def test_build_matrix_prompt_with_thread_history_ignores_tool_trace_events() -> 
         ),
     ]
 
-    prompt = build_matrix_prompt_with_thread_history(
+    prompt = _build_matrix_prompt_with_thread_history(
         "Follow-up",
         thread_history,
         current_sender="@bob:localhost",
@@ -5621,7 +5640,7 @@ def test_build_matrix_prompt_with_thread_history_ignores_tool_trace_events() -> 
 def test_build_matrix_prompt_with_thread_history_without_tool_trace_is_unchanged() -> None:
     thread_history = [make_visible_message(sender="@alice:localhost", body="Earlier context")]
 
-    prompt = build_matrix_prompt_with_thread_history(
+    prompt = _build_matrix_prompt_with_thread_history(
         "Follow-up",
         thread_history,
         current_sender="@bob:localhost",
@@ -5694,7 +5713,7 @@ async def test_prepare_agent_and_prompt_uses_room_resolved_agent_model_for_execu
         ),
         runtime_paths,
     )
-    monkeypatch.setattr("mindroom.matrix.rooms.get_room_alias_from_id", lambda *_args: "lobby")
+    monkeypatch.setattr("mindroom.matrix.state.get_room_alias_from_id", lambda *_args: "lobby")
     live_agent = _agent()
 
     with (
@@ -5824,10 +5843,11 @@ async def test_prepare_agent_and_prompt_uses_full_thread_fallback_for_threaded_m
     ]
 
     with (
-        patch.object(
-            Config,
-            "get_ids",
-            return_value={"test_agent": SimpleNamespace(full_id="@bot:localhost")},
+        patch(
+            "mindroom.execution_preparation.entity_identity_registry",
+            return_value=SimpleNamespace(
+                current_ids={"test_agent": SimpleNamespace(full_id="@bot:localhost")},
+            ),
         ),
         patch("mindroom.ai.create_agent", return_value=live_agent),
         patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
@@ -6020,7 +6040,7 @@ async def test_prepare_agent_and_prompt_syncs_enriched_compaction_outcomes_back_
 
     original_outcome = _make_test_compaction_outcome()
     collector = [original_outcome]
-    prepared_execution = PreparedExecutionContext(
+    prepared_execution = _PreparedExecutionContext(
         messages=(Message(role="user", content="Current prompt"),),
         replay_plan=None,
         unseen_event_ids=[],
@@ -6068,7 +6088,7 @@ async def test_prepare_agent_and_prompt_populates_empty_collector_with_enriched_
 
     original_outcome = _make_test_compaction_outcome()
     collector: list[CompactionOutcome] = []
-    prepared_execution = PreparedExecutionContext(
+    prepared_execution = _PreparedExecutionContext(
         messages=(Message(role="user", content="Current prompt"),),
         replay_plan=None,
         unseen_event_ids=[],
@@ -6116,7 +6136,7 @@ async def test_prepare_agent_and_prompt_enriches_compaction_outcomes_without_col
     live_agent.tools = [Function.from_callable(search_docs)]
 
     original_outcome = _make_test_compaction_outcome()
-    prepared_execution = PreparedExecutionContext(
+    prepared_execution = _PreparedExecutionContext(
         messages=(Message(role="user", content="Current prompt"),),
         replay_plan=None,
         unseen_event_ids=[],
@@ -6159,7 +6179,7 @@ async def test_prepare_agent_and_prompt_omits_zero_breakdown_segments_in_notice(
     live_agent.tools = None
 
     original_outcome = _make_test_compaction_outcome()
-    prepared_execution = PreparedExecutionContext(
+    prepared_execution = _PreparedExecutionContext(
         messages=(Message(role="user", content="x" * 248),),
         replay_plan=None,
         unseen_event_ids=[],
@@ -6201,7 +6221,7 @@ async def test_prepare_agent_and_prompt_keeps_empty_collector_when_no_compaction
     config, runtime_paths = _make_config(tmp_path)
     live_agent = _agent()
     collector: list[CompactionOutcome] = []
-    prepared_execution = PreparedExecutionContext(
+    prepared_execution = _PreparedExecutionContext(
         messages=(Message(role="user", content="Current prompt"),),
         replay_plan=None,
         unseen_event_ids=[],
@@ -6455,7 +6475,7 @@ def test_plan_replay_that_fits_disables_replay_when_no_history_fits_budget() -> 
         ],
     )
 
-    replay_plan = plan_replay_that_fits(
+    replay_plan = _plan_replay_that_fits(
         session=session,
         scope=HistoryScope(kind="agent", scope_id="test_agent"),
         history_settings=ResolvedHistorySettings(

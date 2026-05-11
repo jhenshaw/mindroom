@@ -89,6 +89,9 @@ __all__ = [
 ]
 
 _TerminalStreamStatus = Literal["completed", "cancelled", "error"]
+_PROGRESS_PLACEHOLDER = PROGRESS_PLACEHOLDER
+_CANCELLED_RESPONSE_NOTE = CANCELLED_RESPONSE_NOTE
+_INTERRUPTED_RESPONSE_NOTE = INTERRUPTED_RESPONSE_NOTE
 
 
 class StreamingDeliveryError(Exception):

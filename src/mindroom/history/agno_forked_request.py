@@ -38,6 +38,7 @@ from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, TypeGuard, cast
 
+import agno
 from agno.agent._messages import aget_run_messages
 from agno.agent._tools import determine_tools_for_model
 from agno.run import RunContext
@@ -57,8 +58,17 @@ if TYPE_CHECKING:
     from agno.team import Team
 
 
-type ToolDefinition = dict[str, object]
-type PreparedTool = Function | ToolDefinition
+_SUPPORTED_AGNO_VERSION = "2.5.13"
+if agno.__version__ != _SUPPORTED_AGNO_VERSION:
+    msg = (
+        "MindRoom's forked Agno provider-request adapter is pinned to "
+        f"agno=={_SUPPORTED_AGNO_VERSION}; found agno=={agno.__version__}."
+    )
+    raise RuntimeError(msg)
+
+
+type _ToolDefinition = dict[str, object]
+type PreparedTool = Function | _ToolDefinition
 
 
 @dataclass(frozen=True)
@@ -66,7 +76,7 @@ class AgnoProviderRequest:
     """Provider-visible request payload assembled by Agno."""
 
     messages: tuple[Message, ...]
-    tools: tuple[ToolDefinition, ...] = ()
+    tools: tuple[_ToolDefinition, ...] = ()
     tool_choice: str | dict[str, object] | None = None
 
 
@@ -426,15 +436,15 @@ def _function_payload(function: Function) -> dict[str, object]:
     }
 
 
-def _is_tool_definition_dict(tool: object) -> TypeGuard[ToolDefinition]:
+def _is_tool_definition_dict(tool: object) -> TypeGuard[_ToolDefinition]:
     if not isinstance(tool, dict):
         return False
-    candidate_tool = cast("ToolDefinition", tool)
+    candidate_tool = cast("_ToolDefinition", tool)
     tool_name = candidate_tool.get("name")
     return isinstance(tool_name, str) and bool(tool_name)
 
 
-def _dict_tool_payload(tool: ToolDefinition) -> dict[str, object]:
+def _dict_tool_payload(tool: _ToolDefinition) -> dict[str, object]:
     parameters = tool.get("parameters")
     return {
         "name": str(tool["name"]),

@@ -134,7 +134,7 @@ def _detach_cancelled_compaction_request(
 
 
 @dataclass(frozen=True)
-class ResolvedCompactionRuntime:
+class _ResolvedCompactionRuntime:
     """Resolved model/window inputs needed for one compaction attempt."""
 
     model_name: str
@@ -419,7 +419,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
     all_compacted_run_ids: set[str] = set()
     compacted_messages: list[Message] = []
     pending_selected_run_ids: set[str] | None = None
-    per_call_summary_input_budget = effective_summary_input_budget_tokens(
+    per_call_summary_input_budget = _effective_summary_input_budget_tokens(
         summary_input_budget,
         compaction_context_window,
     )
@@ -679,7 +679,7 @@ def normalize_compaction_budget_tokens(tokens: int, context_window: int | None) 
     return min(tokens, context_window // 2)
 
 
-def effective_summary_input_budget_tokens(summary_input_budget: int, compaction_context_window: int | None) -> int:
+def _effective_summary_input_budget_tokens(summary_input_budget: int, compaction_context_window: int | None) -> int:
     """Return the conservative per-call summary input budget."""
     if compaction_context_window is None or compaction_context_window <= 0:
         return summary_input_budget
@@ -693,16 +693,16 @@ def resolve_compaction_runtime_settings(
     compaction_config: CompactionConfig,
     active_model_name: str,
     active_context_window: int | None,
-) -> ResolvedCompactionRuntime:
+) -> _ResolvedCompactionRuntime:
     """Resolve the effective compaction model name and usable window for one run."""
     model_name = compaction_config.model or active_model_name
     model_context_window = config.get_model_context_window(model_name)
     if compaction_config.model is not None:
-        return ResolvedCompactionRuntime(
+        return _ResolvedCompactionRuntime(
             model_name=model_name,
             context_window=model_context_window,
         )
-    return ResolvedCompactionRuntime(
+    return _ResolvedCompactionRuntime(
         model_name=model_name,
         context_window=model_context_window or active_context_window,
     )

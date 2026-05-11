@@ -9,8 +9,6 @@ from mindroom.history.compaction_provider_request import (
     team_tool_definition_payloads_for_logging,
 )
 from mindroom.history.manual import (
-    MANUAL_COMPACTION_SUCCESS_MESSAGE,
-    ManualCompactionRequestResult,
     request_compaction_before_next_reply,
 )
 from mindroom.history.policy import (
@@ -65,8 +63,6 @@ __all__ = [
     "CompactionOutcome",
     "CompactionReplyOutcome",
     "HistoryScope",
-    "MANUAL_COMPACTION_SUCCESS_MESSAGE",
-    "ManualCompactionRequestResult",
     "PreparedHistoryState",
     "PreparedScopeHistory",
     "ResolvedReplayPlan",
@@ -91,8 +87,8 @@ __all__ = [
     "prepare_scope_history",
     "read_scope_seen_event_ids",
     "request_compaction_before_next_reply",
-    "resolve_history_execution_plan",
     "resolve_bound_team_scope_context",
+    "resolve_history_execution_plan",
     "strip_transient_enrichment_from_session",
     "team_tool_definition_payloads_for_logging",
     "update_scope_seen_event_ids",
