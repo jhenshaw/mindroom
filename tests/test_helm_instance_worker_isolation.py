@@ -125,6 +125,14 @@ def test_instance_chart_worker_network_policy_has_no_static_external_egress() ->
         "matchLabels": {"customer": "demo"},
         "matchExpressions": [{"key": "app", "operator": "In", "values": ["mindroom", "synapse"]}],
     }
+    assert worker_policy["spec"]["podSelector"] == {
+        "matchLabels": {
+            "app.kubernetes.io/managed-by": "mindroom",
+            "app.kubernetes.io/name": "mindroom-worker",
+            "customer": "demo",
+            "mindroom.ai/component": "worker",
+        },
+    }
     assert worker_policy["spec"]["policyTypes"] == ["Ingress", "Egress"]
     assert worker_policy["spec"]["egress"] == [
         {
