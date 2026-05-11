@@ -1333,6 +1333,7 @@ class ResponseRunner:
                 tracked_event_id = run_message_id
         except StreamingDeliveryError as error:
             _log_streaming_delivery_error(self.deps.logger, response_label="Team", error=error)
+            stream_transport_outcome = error.transport_outcome
             if error.event_id:
                 tracked_event_id = error.event_id
             if self._record_stream_delivery_error(
@@ -1916,7 +1917,7 @@ class ResponseRunner:
             compaction_outcomes_collector.extend(compaction_outcomes)
         return delivery
 
-    async def process_and_respond_streaming(  # noqa: C901, PLR0912, PLR0915
+    async def process_and_respond_streaming(  # noqa: C901, PLR0915
         self,
         request: ResponseRequest,
         *,
@@ -1996,6 +1997,7 @@ class ResponseRunner:
                 await lifecycle.emit_session_started(session_started_watch)
         except StreamingDeliveryError as error:
             _log_streaming_delivery_error(self.deps.logger, response_label="Bot", error=error)
+            stream_transport_outcome = error.transport_outcome
             tool_trace[:] = error.tool_trace
             if self._record_stream_delivery_error(
                 recorder=turn_recorder,

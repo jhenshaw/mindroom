@@ -3186,7 +3186,6 @@ class TestStreamingBehavior:
                 room_id="!test:localhost",
                 reply_to_event_id="$original_123",
                 thread_id=None,
-                sender_domain="localhost",
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=stream(),

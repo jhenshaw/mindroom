@@ -604,9 +604,7 @@ class StreamingResponse:
             "placeholder_only" if attempted_rendered_body == _PROGRESS_PLACEHOLDER else "visible_body"
         )
         try:
-            retry_terminal_update = final_stream_status == STREAM_STATUS_COMPLETED and not (
-                error is not None and is_expected_matrix_delivery_policy_error(error)
-            )
+            retry_terminal_update = final_stream_status == STREAM_STATUS_COMPLETED
             retry_terminal_update_immediately = (
                 final_stream_status != STREAM_STATUS_COMPLETED
                 and not restart_interrupted
