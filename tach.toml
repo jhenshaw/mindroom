@@ -2490,6 +2490,7 @@ from = ["mindroom.matrix.event_info"]
 [[interfaces]]
 expose = [
     "DeliveredMatrixEvent",
+    "MatrixExpectedDeliveryPolicyError",
     "PermanentMatrixStartupError",
     "ResolvedVisibleMessage",
     "RoomThreadsPageError",
@@ -2502,6 +2503,7 @@ expose = [
     "get_room_name",
     "get_room_threads_page",
     "invite_to_room",
+    "is_expected_matrix_delivery_policy_error",
     "join_room",
     "leave_room",
     "login",

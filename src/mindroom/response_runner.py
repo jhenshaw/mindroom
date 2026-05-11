@@ -210,7 +210,11 @@ def _log_streaming_delivery_error(
     unexpected_message = (
         "Error in streaming response" if response_label == "Bot" else "Error in team streaming response"
     )
-    logger.exception(unexpected_message, error=str(error.error))
+    logger.exception(
+        unexpected_message,
+        message_id=error.event_id,
+        error=str(error.error),
+    )
 
 
 def _append_matrix_prompt_context(
