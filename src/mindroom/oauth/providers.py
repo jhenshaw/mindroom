@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
 import secrets
 import time
 import warnings
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 _DEFAULT_AUTHORIZE_TIMEOUT_SECONDS = 20.0
+_DEFAULT_REFRESH_SKEW_SECONDS = 60.0
 _TOKEN_ENDPOINT_AUTH_METHOD = "client_secret_post"  # noqa: S105
 _PKCECodeChallengeMethod = Literal["S256"]
 
@@ -242,6 +244,23 @@ def oauth_expires_at_from_response(token_response: Mapping[str, Any]) -> float |
     if isinstance(expires_in, int | float) and expires_in > 0:
         return time.time() + float(expires_in)
     return None
+
+
+def _token_data_needs_refresh(
+    token_data: Mapping[str, Any],
+    *,
+    now: float | None = None,
+) -> bool:
+    refresh_token = token_data.get("refresh_token")
+    if not isinstance(refresh_token, str) or not refresh_token:
+        return False
+    token = token_data.get("token") or token_data.get("access_token")
+    if not isinstance(token, str) or not token:
+        return True
+    expires_at = token_data.get("expires_at")
+    if isinstance(expires_at, bool) or not isinstance(expires_at, int | float) or not math.isfinite(expires_at):
+        return False
+    return float(expires_at) <= (now if now is not None else time.time()) + _DEFAULT_REFRESH_SKEW_SECONDS
 
 
 def _generate_pkce_code_verifier() -> str:
@@ -479,6 +498,76 @@ class OAuthProvider:
             parser(self, token_response, client_config, runtime_paths),
             client_id=client_config.client_id,
         )
+
+    async def refresh_token_data(
+        self,
+        token_data: Mapping[str, Any],
+        runtime_paths: RuntimePaths,
+    ) -> dict[str, Any] | None:
+        """Refresh expiring token data and return updated credentials, or None."""
+        if not _token_data_needs_refresh(token_data):
+            return None
+        refresh_token = cast("str", token_data["refresh_token"])
+
+        client_config = self.require_client_config(runtime_paths)
+        async with AsyncOAuth2Client(
+            client_id=client_config.client_id,
+            client_secret=client_config.client_secret,
+            scope=self.scopes,
+            token_endpoint_auth_method=_TOKEN_ENDPOINT_AUTH_METHOD,
+            timeout=_DEFAULT_AUTHORIZE_TIMEOUT_SECONDS,
+        ) as client:
+            try:
+                token_response = await client.refresh_token(
+                    self.token_url,
+                    refresh_token=refresh_token,
+                )
+            except (AuthlibBaseError, HTTPError) as exc:
+                msg = "OAuth token refresh failed"
+                raise OAuthProviderError(msg) from exc
+        if not isinstance(token_response, Mapping):
+            msg = "OAuth token refresh failed"
+            raise OAuthProviderError(msg)
+
+        refresh_response = dict(token_response)
+        response_refresh_token = refresh_response.get("refresh_token")
+        existing_refresh_token = token_data.get("refresh_token")
+        if (
+            (not isinstance(response_refresh_token, str) or not response_refresh_token)
+            and isinstance(existing_refresh_token, str)
+            and existing_refresh_token
+        ):
+            refresh_response["refresh_token"] = existing_refresh_token
+
+        response_claims = refresh_response.get("_oauth_claims")
+        existing_claims = token_data.get("_oauth_claims")
+        if (
+            (not isinstance(response_claims, Mapping) or not response_claims)
+            and isinstance(existing_claims, Mapping)
+            and existing_claims
+        ):
+            refresh_response["_oauth_claims"] = existing_claims
+        if (
+            refresh_response.get("_oauth_claims_verified") is not True
+            and token_data.get("_oauth_claims_verified") is True
+        ):
+            refresh_response["_oauth_claims_verified"] = True
+        parser = self.token_parser or _default_token_parser
+        result = parser(self, refresh_response, client_config, runtime_paths)
+        verified_claims = refresh_response.get("_oauth_claims")
+        if (
+            not result.claims_verified
+            and refresh_response.get("_oauth_claims_verified") is True
+            and isinstance(verified_claims, Mapping)
+        ):
+            result = OAuthTokenResult(
+                token_data=result.token_data,
+                claims=dict(verified_claims),
+                claims_verified=True,
+            )
+        result = _token_result_with_core_metadata(self, result, client_id=client_config.client_id)
+        self.validate_claims(result, runtime_paths)
+        return self.token_result_with_safe_claims(result).token_data
 
     def resolved_allowed_email_domains(self, runtime_paths: RuntimePaths) -> tuple[str, ...]:
         """Return email-domain restrictions from provider config and env."""
