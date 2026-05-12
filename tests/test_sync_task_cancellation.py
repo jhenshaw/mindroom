@@ -19,6 +19,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration import runtime as runtime_helpers
 from mindroom.orchestration.runtime import (
     EntityStartResults,
+    _hold_supervisor_until_sync_task_finishes,
     _MatrixSyncCancellationTimeoutError,
     _MatrixSyncStalledError,
     _SyncIteration,
@@ -361,6 +362,18 @@ async def test_sync_forever_with_restart_stays_attached_after_sync_cancel_timeou
         for sync_task in sync_tasks:
             with suppress(asyncio.CancelledError):
                 await sync_task
+
+
+@pytest.mark.asyncio
+async def test_hold_supervisor_treats_inner_sync_cancellation_as_completion() -> None:
+    """A sync task that finally cancels itself should not cancel its supervisor."""
+    bot = _FakeBot()
+    sync_task = asyncio.create_task(asyncio.sleep(60), name="matrix_sync_inner_cancelled")
+    sync_task.cancel(msg=SYNC_RESTART_CANCEL_MSG)
+
+    await _hold_supervisor_until_sync_task_finishes(bot, sync_task)
+
+    assert sync_task.cancelled()
 
 
 @pytest.mark.asyncio

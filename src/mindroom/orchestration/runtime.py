@@ -265,8 +265,9 @@ async def _hold_supervisor_until_sync_task_finishes(
         try:
             await asyncio.shield(sync_task)
         except asyncio.CancelledError:
-            request_task_cancel(sync_task, cancel_msg=SYNC_RESTART_CANCEL_MSG)
-            raise
+            if supervisor_task is not None and supervisor_task.cancelling():
+                request_task_cancel(sync_task, cancel_msg=SYNC_RESTART_CANCEL_MSG)
+                raise
     finally:
         if sync_task.done() and supervisor_task is not None:
             _UNRESPONSIVE_MATRIX_SYNC_TASKS.pop(supervisor_task, None)
