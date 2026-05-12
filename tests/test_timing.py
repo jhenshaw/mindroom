@@ -305,6 +305,40 @@ def test_elapsed_timing_logs_on_exception(monkeypatch: pytest.MonkeyPatch) -> No
     _assert_timing_logged(logger, "block_error_label")
 
 
+def test_elapsed_timing_ignores_reserved_metadata_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Caller metadata should not collide with the elapsed timing event shape."""
+    monkeypatch.setenv("MINDROOM_TIMING", "1")
+    logger = _mock_timing_logger(monkeypatch)
+
+    with elapsed_timing("block_label", label="caller_label", start=0.0, duration_ms=999, event_name="caller_event"):
+        pass
+
+    logger.debug.assert_called_once()
+    assert logger.debug.call_args.args == ("timing_elapsed",)
+    assert logger.debug.call_args.kwargs["label"] == "block_label"
+    assert logger.debug.call_args.kwargs["duration_ms"] != 999
+    assert "start" not in logger.debug.call_args.kwargs
+    assert "event_name" not in logger.debug.call_args.kwargs
+
+
+def test_elapsed_timing_emit_failure_does_not_mask_block_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Timing emission failures should not replace the original block exception."""
+
+    def fail_emit(*_args: object, **_kwargs: object) -> None:
+        msg = "timing failed"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(timing_module, "emit_elapsed_timing", fail_emit)
+
+    def fail_block() -> None:
+        with elapsed_timing("block_label"):
+            msg = "original failure"
+            raise ValueError(msg)
+
+    with pytest.raises(ValueError, match="original failure"):
+        fail_block()
+
+
 def test_timing_enabled_reflects_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """The public timing-enabled helper should mirror the environment switch."""
     monkeypatch.delenv("MINDROOM_TIMING", raising=False)

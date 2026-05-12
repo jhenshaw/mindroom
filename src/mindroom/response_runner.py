@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
@@ -56,7 +57,7 @@ from mindroom.streaming import (
 )
 from mindroom.teams import TeamMode, select_model_for_team, team_response, team_response_stream
 from mindroom.thread_summary import thread_summary_message_count_hint
-from mindroom.timing import DispatchPipelineTiming, elapsed_timing, timed
+from mindroom.timing import DispatchPipelineTiming, elapsed_timing, emit_elapsed_timing, timed
 from mindroom.tool_system.runtime_context import ToolDispatchContext, runtime_context_from_dispatch_context
 from mindroom.tool_system.worker_routing import run_with_tool_execution_identity, stream_with_tool_execution_identity
 
@@ -463,8 +464,12 @@ class ResponseRunner:
             "is_team": is_team,
         }
         if not recorder.claim_interrupted_persistence():
-            with elapsed_timing("response_runner.interrupted_replay.total", outcome="skipped", **timing_data):
-                pass
+            emit_elapsed_timing(
+                "response_runner.interrupted_replay.total",
+                time.monotonic(),
+                outcome="skipped",
+                **timing_data,
+            )
             return
         with elapsed_timing(
             "response_runner.interrupted_replay.total",
