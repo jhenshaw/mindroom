@@ -83,10 +83,11 @@ nix-shell -I nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos shell.ni
 #    - authorization.default_room_access: true
 
 # 4. Create .env (MINDROOM_NAMESPACE must match ^[a-z0-9]{4,32}$, no underscores/hyphens)
+namespace="live$(date +%H%M%S)"
 cat > "$tmp/.env" << EOF
 MATRIX_HOMESERVER=http://localhost:8008
 SSL_VERIFY=false
-MINDROOM_NAMESPACE=smoketest01
+MINDROOM_NAMESPACE=$namespace
 MINDROOM_CONFIG_PATH=$tmp/config.yaml
 MINDROOM_STORAGE_PATH=$tmp/mindroom_data
 EOF
@@ -166,7 +167,7 @@ This prints ONLY bots that are in rooms, with their credentials and room IDs. Pi
 ```bash
 BOT_TOKEN=$(curl -sS -X POST 'http://localhost:8008/_matrix/client/v3/login' \
   -H 'Content-Type: application/json' \
-  -d '{"type":"m.login.password","identifier":{"type":"m.id.user","user":"BOT_USERNAME"},"password":"BOT_PASSWORD"}' \
+  -d "{\"type\":\"m.login.password\",\"identifier\":{\"type\":\"m.id.user\",\"user\":\"$BOT_USERNAME\"},\"password\":\"$BOT_PASSWORD\"}" \
   | python3 -c 'import sys,json; print(json.load(sys.stdin)["access_token"])')
 
 # URL-encode room ID: ! → %21, : → %3A

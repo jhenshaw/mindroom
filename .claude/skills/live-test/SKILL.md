@@ -1,3 +1,8 @@
+---
+name: live-test
+description: Run live end-to-end checks for MindRoom using the lab service, isolated Matrix instances, disposable Matrix users, Matty, API probes, and frontend screenshots.
+---
+
 Live-test skill for MindRoom repository — runs real product and collects runtime evidence.
 
 ## ⛔ CRITICAL SAFETY
