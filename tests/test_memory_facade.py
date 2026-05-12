@@ -20,6 +20,8 @@ from mindroom.memory import list_all_agent_memories as public_list_all_agent_mem
 from mindroom.memory import search_agent_memories as public_search_agent_memories
 from mindroom.memory import store_conversation_memory as public_store_conversation_memory
 from mindroom.memory import update_agent_memory as public_update_agent_memory
+from mindroom.memory._mem0_backend import _mem0_storage_paths_for_scope_user_id
+from mindroom.memory._policy import agent_scope_user_id
 from mindroom.memory._prompting import format_memories_as_context
 from mindroom.memory._shared import MemoryNotFoundError
 from mindroom.prompts import MEMORY_CONTEXT_PROMPT_TEMPLATE
@@ -784,6 +786,25 @@ class TestMemoryFacade:
         stale_entries = await finance_store.get_all(filters={"user_id": "team_calculator+finance"})
         assert stale_result is None
         assert stale_entries["results"][0]["memory"] == "stale mem0 team copy"
+
+    def test_mem0_targeted_team_lookup_skips_single_agent_roots(
+        self,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        config.memory.backend = "file"
+        config.agents["calculator"].memory_backend = "mem0"
+        config.teams = {"mixed_team": MockTeamConfig(agents=["calculator", "finance"])}
+
+        paths = _mem0_storage_paths_for_scope_user_id(
+            agent_scope_user_id("finance"),
+            storage_path,
+            config,
+            runtime_paths_for(config),
+            target_agent_names=["calculator"],
+        )
+
+        assert paths == []
 
     @pytest.mark.asyncio
     async def test_disabled_backend_crud_facade_does_not_fall_through_to_mem0(

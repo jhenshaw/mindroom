@@ -114,6 +114,8 @@ def _mem0_storage_paths_for_scope_user_id(
     *,
     target_agent_names: list[str] | None = None,
 ) -> list[Path]:
+    if target_agent_names is not None and team_members_from_scope_user_id(scope_user_id, config) is None:
+        return []
     storage_target_agent_names = target_agent_names
     if storage_target_agent_names is None:
         storage_target_agent_names = _mem0_team_storage_agent_names(scope_user_id, config)

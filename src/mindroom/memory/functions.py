@@ -81,7 +81,7 @@ class _MixedTeamMemoryTargetIds:
     mem0: str | None
 
 
-@dataclass(frozen=True)
+@dataclass
 class _PartitionedTeamMemoryContext:
     team_members: list[str]
     members_by_backend: dict[str, list[str]]
@@ -376,7 +376,7 @@ async def _resolve_mixed_team_memory_target_ids(
             target_agent_names=mem0_member_names,
         )
 
-    if file_result is None:
+    if file_member_names and file_result is None:
         if (replica_key := _mem0_replica_key(mem0_result)) is not None:
             file_memory_id = replica_key
             file_result = get_file_agent_memory(
