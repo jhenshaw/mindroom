@@ -12,7 +12,7 @@ You only run MindRoom locally.
 ### 1. Initialize local config
 
 ```bash
-uvx mindroom config init --profile public
+uvx mindroom config init
 ```
 
 This creates:
@@ -20,59 +20,53 @@ This creates:
 - `~/.mindroom/config.yaml`
 - `~/.mindroom/.env` prefilled with `MATRIX_HOMESERVER=https://mindroom.chat`
 
-The `--profile public` template defaults to the `openai` provider.
+The default `--matrix-server mindroom.chat` preset uses hosted Matrix and defaults to the `openai` provider.
 Use `--provider` to select a different provider preset:
 
 ```bash
 # Use Anthropic Claude
-uvx mindroom config init --profile public --provider anthropic
+uvx mindroom config init --provider anthropic
 
 # Use Codex CLI ChatGPT subscription auth
-uvx mindroom config init --profile public-codex
+uvx mindroom config init --provider codex
 
 # Use local Ollama
-uvx mindroom config init --profile public-ollama
+uvx mindroom config init --provider ollama
 
 # Use local llama.cpp through its OpenAI-compatible server
-uvx mindroom config init --profile llama-cpp
+uvx mindroom config init --provider llama.cpp
 
 # Use Vertex AI Claude (Google Cloud)
-uvx mindroom config init --profile public-vertexai-anthropic
+uvx mindroom config init --provider vertexai_claude
 ```
 
-`public-codex` is the canonical profile name for hosted Matrix with Codex CLI subscription auth.
-The shorter `codex` profile alias is also accepted.
-Run `codex login` before starting MindRoom when using this profile.
+Use `--matrix-server mindroom.chat` for hosted Matrix and `--matrix-server self-hosted` when you run your own homeserver.
+Use `--provider` for the model provider.
+Run `codex login` before starting MindRoom when using `--provider codex`.
 
-`public-ollama` uses local Ollama with `gemma4` by default and also configures `qwen3.6:27b`.
-The shorter `ollama` profile alias is also accepted.
+`--provider ollama` uses local Ollama with `gemma4` by default and also configures `qwen3.6:27b`.
 Run `ollama pull gemma4` and `ollama pull qwen3.6:27b` before starting MindRoom.
 
-`llama-cpp` and `public-llama-cpp` use a local OpenAI-compatible llama.cpp server on `http://localhost:8080/v1`.
+`--provider llama.cpp` uses a local OpenAI-compatible llama.cpp server on `http://localhost:8080/v1`.
 Start `llama-server` with one of the configured Unsloth GGUF refs before starting MindRoom.
-These local provider profiles run entirely locally and do not require real cloud API keys such as `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` unless you switch the config to a remote provider.
+These local provider configs run entirely locally and do not require real cloud API keys such as `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` unless you switch the config to a remote provider.
 
-`public-vertexai-anthropic` is the canonical profile name for Vertex AI Claude on hosted Matrix.
-Aliases `public-vertexai-claude`, `vertexai-anthropic`, and `vertexai-claude` are also accepted.
+Use `--provider vertexai_claude` for Vertex AI Claude on hosted Matrix.
 
-Other profiles:
-
-- `--profile full` — rich starter config with interactive provider selection (default)
-- `--profile minimal` or `--minimal` — bare-minimum config
-
-### 2. Add model API key(s)
+### 2. Add remote-provider credentials when needed
 
 ```bash
 $EDITOR ~/.mindroom/.env
 ```
 
-Set at least one key:
+For hosted providers, set the credentials for the provider you selected:
 
 - `ANTHROPIC_API_KEY=...`, or
 - `OPENAI_API_KEY=...`, or
 - `OPENROUTER_API_KEY=...`, or
 - For Codex CLI subscription auth: run `codex login`.
 - For Vertex AI Claude: set `ANTHROPIC_VERTEX_PROJECT_ID` and `CLOUD_ML_REGION` and authenticate with `gcloud auth application-default login`.
+Skip this step for `--provider ollama` or `--provider llama.cpp` unless you also add a remote provider.
 
 ### 3. Pair your local install from chat UI
 

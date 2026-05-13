@@ -463,49 +463,47 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 
 ### config init
 
-Create a starter `config.yaml` with example agents, models, and sensible defaults.
+Create a starter `config.yaml` with example agents, models, memory, and sensible defaults.
 
-Profiles control the template style:
-
-- `--profile full` (default) — rich example config with interactive provider selection
-- `--profile minimal` — bare-minimum config
-- `--profile public` — hosted Matrix (`mindroom.chat`) with prefilled homeserver settings
-- `--profile public-codex` — hosted Matrix with Codex CLI subscription defaults
-- `--profile public-ollama` or `--profile ollama` — hosted Matrix with local Ollama defaults
-- `--profile llama-cpp` or `--profile public-llama-cpp` — hosted Matrix with local llama.cpp OpenAI-compatible defaults
-- `--profile public-vertexai-anthropic` — hosted Matrix with Vertex AI Claude defaults
-
-Provider presets (`--provider`) set the default model: `anthropic`, `codex`, `llama_cpp`, `ollama`, `openai`, `openai_mini`, `openai_nano`, `openrouter`, or `vertexai_claude`.
+Matrix server presets (`--matrix-server`) choose where MindRoom should create Matrix users and rooms: `mindroom.chat` (default hosted Matrix) or `self-hosted` (your own homeserver).
+Provider presets (`--provider`) set the default model: `anthropic`, `codex`, `llama.cpp`, `ollama`, `openai`, `openrouter`, or `vertexai_claude`.
+Generated configs include commented model alternatives for providers that have common variants, such as OpenAI mini/nano models.
 
 ```bash
 # Hosted Matrix quickstart (creates ~/.mindroom/config.yaml)
-mindroom config init --profile public
+mindroom config init
 
-# Minimal config with Anthropic
-mindroom config init --minimal --provider anthropic
+# Self-hosted Matrix with Anthropic
+mindroom config init --matrix-server self-hosted --provider anthropic
 
 # Hosted Matrix with Codex CLI ChatGPT subscription auth
-mindroom config init --profile public-codex
+mindroom config init --matrix-server mindroom.chat --provider codex
 
 # Hosted Matrix with Ollama
-mindroom config init --profile public-ollama
+mindroom config init --matrix-server mindroom.chat --provider ollama
 
 # Hosted Matrix with llama.cpp
-mindroom config init --profile llama-cpp
+mindroom config init --matrix-server mindroom.chat --provider llama.cpp
 
 # Hosted Matrix with Vertex AI Claude
-mindroom config init --profile public-vertexai-anthropic
+mindroom config init --matrix-server mindroom.chat --provider vertexai_claude
+
+# Preview generated YAML without writing files
+mindroom config init --matrix-server mindroom.chat --provider ollama --print
 
 # Force overwrite existing config
 mindroom config init --force
 ```
 
-The `public-codex` profile and `--provider codex` preset generate `provider: codex` with `id: gpt-5.5` and `context_window: 258000`.
+Use `--print` to preview the generated `config.yaml` in the terminal with YAML syntax highlighting.
+It does not create or modify `config.yaml`, `.env`, or starter workspace files.
+
+The `--provider codex` preset generates `provider: codex` with `id: gpt-5.5` and `context_window: 258000`.
 They set `extra_kwargs.reasoning_effort: medium`.
 Prompt caching is enabled automatically per active agent session; leave `prompt_cache_key` unset unless you intentionally want to override the derived key.
 Run `codex login` first so MindRoom can read `~/.codex/auth.json`.
 
-The `public-ollama` profile and `ollama` profile alias generate `provider: ollama` with `id: gemma4`, an additional `qwen3_6_27b` model using `qwen3.6:27b`, and `OLLAMA_HOST=http://localhost:11434`.
+The `--provider ollama` preset generates `provider: ollama` with `id: gemma4`, an additional `qwen3_6_27b` model using `qwen3.6:27b`, and `OLLAMA_HOST=http://localhost:11434`.
 Pull both local models before running MindRoom:
 
 ```bash
@@ -513,7 +511,7 @@ ollama pull gemma4
 ollama pull qwen3.6:27b
 ```
 
-The `llama-cpp` and `public-llama-cpp` profiles generate OpenAI-compatible local server config for Unsloth GGUF models.
+The `--provider llama.cpp` preset generates OpenAI-compatible local server config for Unsloth GGUF models.
 Start llama.cpp with one of the configured model refs before running MindRoom:
 
 ```bash
@@ -735,7 +733,7 @@ mindroom doctor
 ### Initialize a config
 
 ```bash
-mindroom config init --profile public
+mindroom config init
 ```
 
 ### Validate your config
