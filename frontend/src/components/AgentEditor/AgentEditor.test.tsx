@@ -1,4 +1,10 @@
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import {
+  render,
+  screen,
+  fireEvent,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { AgentEditor } from "./AgentEditor";
 import { useConfigStore } from "@/store/configStore";
@@ -328,6 +334,111 @@ describe("AgentEditor", () => {
 
     expect(screen.getByText("Setup Required")).toBeInTheDocument();
     expect(screen.getByLabelText("Weather")).toBeInTheDocument();
+  });
+
+  it("shows backend tool descriptions inline and rich metadata in a details popover", () => {
+    (useTools as any).mockReturnValue({
+      tools: [
+        {
+          name: "shell",
+          display_name: "Shell Commands",
+          description:
+            "Run shell commands in the agent workspace with timeout handling.",
+          helper_text: "Use this for tests, scripts, and workspace automation.",
+          setup_type: "none",
+          status: "available",
+          default_execution_target: "worker",
+          docs_url: "https://docs.example.com/shell",
+          dependencies: ["bash"],
+          function_names: [
+            "run_command",
+            "read_process",
+            "stop_process",
+            "list_processes",
+            "send_stdin",
+            "write_file",
+            "extra_function",
+          ],
+        },
+        {
+          name: "file",
+          display_name: "File",
+          description: "Read and write workspace files.",
+          setup_type: "none",
+          status: "available",
+        },
+      ],
+      loading: false,
+      statusAuthoritative: true,
+    });
+
+    render(<AgentEditor />);
+
+    expect(
+      screen.getByText(
+        "Run shell commands in the agent workspace with timeout handling.",
+      ),
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Show Shell Commands tool details",
+      }),
+    );
+
+    const details = screen.getByRole("dialog", {
+      name: "Shell Commands tool details",
+    });
+    expect(
+      within(details).getByText(
+        "Use this for tests, scripts, and workspace automation.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(details).getByRole("link", { name: "Open documentation" }),
+    ).toHaveAttribute("href", "https://docs.example.com/shell");
+    expect(within(details).getByText("Setup")).toBeInTheDocument();
+    expect(within(details).getByText("none")).toBeInTheDocument();
+    expect(within(details).getByText("Default Runtime")).toBeInTheDocument();
+    expect(within(details).getByText("worker")).toBeInTheDocument();
+    expect(within(details).getByText("run_command")).toBeInTheDocument();
+    expect(within(details).getByText("+1 more")).toBeInTheDocument();
+  });
+
+  it("omits placeholder noise for tools without optional metadata", () => {
+    (useTools as any).mockReturnValue({
+      tools: [
+        {
+          name: "file",
+          display_name: "File",
+          description: "Read and write workspace files.",
+          setup_type: "none",
+          status: "available",
+        },
+      ],
+      loading: false,
+      statusAuthoritative: true,
+    });
+
+    render(<AgentEditor />);
+
+    expect(
+      screen.getByText("Read and write workspace files."),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Show File tool details" }),
+    );
+
+    const details = screen.getByRole("dialog", {
+      name: "File tool details",
+    });
+    expect(
+      within(details).queryByText("No helper text"),
+    ).not.toBeInTheDocument();
+    expect(
+      within(details).queryByText("No documentation"),
+    ).not.toBeInTheDocument();
+    expect(within(details).queryByText("No functions")).not.toBeInTheDocument();
   });
 
   it("shows customized indicators and opens the inline tool settings panel for checked tools", () => {
