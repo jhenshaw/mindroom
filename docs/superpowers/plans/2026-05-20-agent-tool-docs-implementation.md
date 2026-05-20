@@ -109,7 +109,7 @@ Run: `uv sync --all-extras && uv run pre-commit run --all-files`
 Expected: PASS, or report the exact blocking failure.
 Result: `uv sync --all-extras` and `uv run pre-commit run --all-files` both fail before hooks for the same unresolved Git LFS pointer assets.
 
-- [ ] **Step 6: Commit and open PR**
+- [x] **Step 6: Commit and open PR**
 
 Stage only the implementation, dependency, test, spec, and plan files.
 Do not stage unrelated image changes or `.superpowers/brainstorm` mockup artifacts.
