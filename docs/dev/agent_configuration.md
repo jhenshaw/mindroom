@@ -342,6 +342,12 @@ matrix_space:
   name: "MindRoom"  # Display name for the root Space
 ```
 
+Concrete Matrix users in `authorization.global_users` receive root Space admin power.
+The configured `mindroom_user` also receives root Space admin power when the internal account exists.
+Room-specific `authorization.room_permissions` users do not become root Space admins unless they are also global users.
+Root Space admin reconciliation is grant-only and preserves existing Matrix admins.
+Removing a user from `authorization.global_users` stops future MindRoom authorization but does not automatically demote that user in the Space.
+
 ## Matrix Delivery Configuration
 
 Configure outgoing Matrix delivery policy:
