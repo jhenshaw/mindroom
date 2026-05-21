@@ -301,6 +301,34 @@ class TestProvisionerEndpoints:
         update_payloads = [call_.args[0] for call_ in mock_supabase.table().update.call_args_list if call_.args]
         assert any(payload.get("openrouter_key_hash") == "hobby_hash" for payload in update_payloads)
 
+    def test_hobby_provisioning_missing_openrouter_management_key_returns_operator_error(
+        self,
+        client: TestClient,
+        mock_supabase: MagicMock,
+        mock_kubectl: AsyncMock,
+        mock_helm: AsyncMock,
+        mock_wait_for_deployment: AsyncMock,
+        valid_auth_header: dict,
+        mock_config,
+    ):
+        """Missing OpenRouter management configuration is a platform operator error."""
+        mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
+        mock_supabase.table().update().eq().execute.return_value = Mock()
+
+        with (
+            patch("backend.routes.provisioner.OPENROUTER_PROVISIONING_API_KEY", "", create=True),
+            patch("backend.routes.provisioner._apply_instance_secret", new_callable=AsyncMock) as apply_secret,
+        ):
+            response = client.post(
+                "/system/provision",
+                json={"subscription_id": "sub_test_123", "account_id": "acc_test_123", "tier": "hobby"},
+                headers=valid_auth_header,
+            )
+
+        assert response.status_code == 500
+        assert "OPENROUTER_PROVISIONING_API_KEY" in response.json()["detail"]
+        apply_secret.assert_not_called()
+
     def test_pro_provisioning_uses_larger_resource_profile_and_openrouter_limit(
         self,
         client: TestClient,

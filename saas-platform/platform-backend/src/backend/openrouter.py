@@ -17,6 +17,10 @@ class OpenRouterError(RuntimeError):
     """Raised when OpenRouter key provisioning fails."""
 
 
+class OpenRouterConfigurationError(OpenRouterError):
+    """Raised when local OpenRouter provisioning configuration is missing."""
+
+
 @dataclass(frozen=True)
 class OpenRouterKeyPlan:
     """Inputs for a monthly-limited OpenRouter key."""
@@ -57,7 +61,7 @@ def create_openrouter_key(
     """Create a monthly spending-limited OpenRouter API key."""
     if not management_api_key.strip():
         msg = "OPENROUTER_PROVISIONING_API_KEY is required to create included-budget OpenRouter keys"
-        raise OpenRouterError(msg)
+        raise OpenRouterConfigurationError(msg)
 
     body = json.dumps(
         {
@@ -74,15 +78,26 @@ def create_openrouter_key(
 
     status, response_body = http_post(OPENROUTER_KEYS_URL, headers, body)
     if status != 201:
-        msg = f"OpenRouter key creation failed with status {status}"
+        error_detail = response_body.decode("utf-8", errors="replace")
+        msg = f"OpenRouter key creation failed with status {status}: {error_detail}"
         raise OpenRouterError(msg)
 
-    payload = json.loads(response_body.decode("utf-8"))
-    data = payload["data"]
-    return CreatedOpenRouterKey(
-        key=payload["key"],
-        hash=data["hash"],
-        label=data["label"],
-        limit_usd=int(data["limit"]),
-        limit_reset=data["limit_reset"],
-    )
+    try:
+        payload = json.loads(response_body.decode("utf-8"))
+        data = payload["data"]
+        return CreatedOpenRouterKey(
+            key=payload["key"],
+            hash=data["hash"],
+            label=data["label"],
+            limit_usd=int(data["limit"]),
+            limit_reset=data["limit_reset"],
+        )
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        msg = "Failed to decode OpenRouter key creation response"
+        raise OpenRouterError(msg) from exc
+    except KeyError as exc:
+        msg = f"OpenRouter key creation response is missing field: {exc.args[0]}"
+        raise OpenRouterError(msg) from exc
+    except (TypeError, ValueError) as exc:
+        msg = "OpenRouter key creation response has invalid field values"
+        raise OpenRouterError(msg) from exc

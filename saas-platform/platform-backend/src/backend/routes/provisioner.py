@@ -11,9 +11,11 @@ import secrets
 import tempfile
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from functools import partial
 from typing import Annotated, Any
 from uuid import UUID
 
+import anyio
 from backend.config import (
     ANTHROPIC_API_KEY,
     DEEPSEEK_API_KEY,
@@ -65,7 +67,13 @@ from backend.k8s import (
     wait_for_deployment_ready,
 )
 from backend.models import ActionResult, ProvisionResponse, SyncResult, SyncUpdateOut
-from backend.openrouter import CreatedOpenRouterKey, OpenRouterError, OpenRouterKeyPlan, create_openrouter_key
+from backend.openrouter import (
+    CreatedOpenRouterKey,
+    OpenRouterConfigurationError,
+    OpenRouterError,
+    OpenRouterKeyPlan,
+    create_openrouter_key,
+)
 from backend.pricing import get_plan_details
 from backend.process import run_helm
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
@@ -421,18 +429,29 @@ async def _provision_openrouter_key(
         if existing_key:
             return existing_key
 
+    create_key = partial(
+        create_openrouter_key,
+        management_api_key=OPENROUTER_PROVISIONING_API_KEY,
+        plan=OpenRouterKeyPlan(
+            name=_openrouter_key_name(tier=tier, account_id=account_id, instance_id=instance_id),
+            monthly_limit_usd=monthly_limit_usd,
+        ),
+    )
     try:
-        created_key = create_openrouter_key(
-            management_api_key=OPENROUTER_PROVISIONING_API_KEY,
-            plan=OpenRouterKeyPlan(
-                name=_openrouter_key_name(tier=tier, account_id=account_id, instance_id=instance_id),
-                monthly_limit_usd=monthly_limit_usd,
-            ),
-        )
+        created_key = await anyio.to_thread.run_sync(create_key)
+    except OpenRouterConfigurationError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     except OpenRouterError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    _persist_openrouter_key_metadata(sb, instance_id, created_key)
+    await anyio.to_thread.run_sync(
+        partial(
+            _persist_openrouter_key_metadata,
+            sb,
+            instance_id,
+            created_key,
+        )
+    )
     return created_key.key
 
 
