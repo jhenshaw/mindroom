@@ -176,7 +176,6 @@ class TestProvisionerEndpoints:
             PLATFORM_DOMAIN="mindroom.test",
             SUPABASE_URL="https://supabase.test",
             SUPABASE_ANON_KEY="test-anon-key",
-            OPENROUTER_API_KEY="test-openrouter",
             OPENAI_API_KEY="test-openai",
         ):
             yield
@@ -209,7 +208,7 @@ class TestProvisionerEndpoints:
         mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
         mock_supabase.table().update().eq().execute.return_value = Mock()
 
-        provision_data = {"subscription_id": "sub_test_123", "account_id": "acc_test_123", "tier": "starter"}
+        provision_data = {"subscription_id": "sub_test_123", "account_id": "acc_test_123", "tier": "byok"}
 
         # Make request
         response = client.post("/system/provision", json=provision_data, headers=valid_auth_header)
@@ -281,7 +280,9 @@ class TestProvisionerEndpoints:
 
         with (
             patch("backend.routes.provisioner.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management", create=True),
-            patch("backend.routes.provisioner.create_openrouter_key", return_value=created_key, create=True) as create_key,
+            patch(
+                "backend.routes.provisioner.create_openrouter_key", return_value=created_key, create=True
+            ) as create_key,
             patch("backend.routes.provisioner._apply_instance_secret", new_callable=AsyncMock) as apply_secret,
         ):
             apply_secret.return_value = "hash"
@@ -323,7 +324,9 @@ class TestProvisionerEndpoints:
 
         with (
             patch("backend.routes.provisioner.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management", create=True),
-            patch("backend.routes.provisioner.create_openrouter_key", return_value=created_key, create=True) as create_key,
+            patch(
+                "backend.routes.provisioner.create_openrouter_key", return_value=created_key, create=True
+            ) as create_key,
             patch("backend.routes.provisioner._apply_instance_secret", new_callable=AsyncMock) as apply_secret,
         ):
             apply_secret.return_value = "hash"
@@ -377,7 +380,7 @@ class TestProvisionerEndpoints:
         ):
             response = client.post(
                 "/system/provision",
-                json={"subscription_id": "sub_test_123", "account_id": account_id, "tier": "starter"},
+                json={"subscription_id": "sub_test_123", "account_id": account_id, "tier": "byok"},
                 headers=valid_auth_header,
             )
 
@@ -412,7 +415,7 @@ class TestProvisionerEndpoints:
         provision_data = {
             "subscription_id": "sub_test_123",
             "account_id": "acc_test_123",
-            "tier": "professional",
+            "tier": "byok",
             "instance_id": "456",  # Existing instance
         }
 
@@ -447,7 +450,7 @@ class TestProvisionerEndpoints:
             json={
                 "subscription_id": "sub_test_123",
                 "account_id": "acc_test_123",
-                "tier": "professional",
+                "tier": "byok",
                 "instance_id": "456",
             },
             headers=valid_auth_header,
@@ -479,7 +482,7 @@ class TestProvisionerEndpoints:
             json={
                 "subscription_id": "sub_test_123",
                 "account_id": "acc_test_123",
-                "tier": "professional",
+                "tier": "byok",
                 "instance_id": "456",
                 "enable_credentials_encryption": True,
             },
@@ -512,7 +515,7 @@ class TestProvisionerEndpoints:
             json={
                 "subscription_id": "sub_test_123",
                 "account_id": "acc_test_123",
-                "tier": "professional",
+                "tier": "byok",
                 "instance_id": "456",
                 "enable_credentials_encryption": True,
             },
@@ -542,14 +545,14 @@ class TestProvisionerEndpoints:
             json={
                 "subscription_id": "sub_test_123",
                 "account_id": "acc_test_123",
-                "tier": "professional",
+                "tier": "byok",
                 "instance_id": "456",
             },
             headers=valid_auth_header,
         )
 
         assert response.status_code == 500
-        assert "Failed to inspect existing credential encryption state" in response.json()["detail"]
+        assert "Failed to inspect existing Secret value credentials_encryption_key" in response.json()["detail"]
         mock_helm.assert_not_called()
 
     def test_provision_instance_not_found_for_reprovision(

@@ -61,7 +61,7 @@ describe('InstanceCard', () => {
   const trialSubscription = {
     ...freeSubscription,
     id: 'sub-trial',
-    tier: 'starter' as const,
+    tier: 'byok' as const,
     status: 'trialing' as const,
     trial_ends_at: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString(),
     can_run_instances: true,

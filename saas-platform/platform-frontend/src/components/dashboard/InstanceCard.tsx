@@ -8,7 +8,7 @@ import { buildCinnyLoginUrl } from '@/lib/cinny'
 import { Card, CardHeader } from '@/components/ui/Card'
 import { logger } from '@/lib/logger'
 
-const INFRASTRUCTURE_TIERS = new Set(['starter', 'professional', 'enterprise'])
+const INFRASTRUCTURE_TIERS = new Set(['byok', 'hobby', 'pro', 'enterprise'])
 
 function subscriptionCanRunInfrastructure(subscription: Subscription | null | undefined) {
   if (subscription === undefined) return true

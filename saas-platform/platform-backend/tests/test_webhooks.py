@@ -44,7 +44,7 @@ class TestWebhookEndpoints:
         subscription_id: str = "sub_test_123",
         customer_id: str = "cus_test_123",
         status: str = "active",
-        tier: str = "starter",
+        tier: str = "byok",
         billing_cycle: str = "monthly",
         quantity: int = 1,
     ) -> dict:
@@ -157,7 +157,7 @@ class TestWebhookEndpoints:
     ):
         """Test successful subscription update webhook."""
         # Setup
-        subscription_data = self._create_subscription_data(tier="professional", quantity=5)
+        subscription_data = self._create_subscription_data(tier="pro", quantity=5)
         event = self._create_stripe_event("customer.subscription.updated", subscription_data)
         mock_stripe_signature.return_value = event
 
@@ -422,10 +422,12 @@ class TestWebhookEndpoints:
         assert data["received"] is True
         assert data["error"] is None
 
-    def test_professional_plan_scaling(self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock):
-        """Test professional plan with multiple users scales limits correctly."""
+    def test_pro_plan_uses_configured_limits(
+        self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock
+    ):
+        """Test pro plan ignores Stripe quantity and uses configured limits."""
         # Setup
-        subscription_data = self._create_subscription_data(tier="professional", quantity=10)
+        subscription_data = self._create_subscription_data(tier="pro", quantity=10)
         event = self._create_stripe_event("customer.subscription.created", subscription_data)
         mock_stripe_signature.return_value = event
 
@@ -433,12 +435,11 @@ class TestWebhookEndpoints:
         mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"id": "account_123"})
         mock_supabase.table().select().eq().execute.return_value = Mock(data=[])
 
-        # Capture the insert call to verify scaled limits
-        insert_data = None
+        # Capture the insert call to verify configured limits
+        inserted_payloads = []
 
         def capture_insert(data):
-            nonlocal insert_data
-            insert_data = data
+            inserted_payloads.append(data)
             return Mock(execute=Mock(return_value=Mock()))
 
         mock_supabase.table().insert = capture_insert
@@ -452,9 +453,11 @@ class TestWebhookEndpoints:
         assert data["received"] is True
         assert data["error"] is None
 
-        # Professional plan should scale by quantity
-        # Base limits would be multiplied by 10
-        assert insert_data is not None
+        subscription_payload = next(
+            payload for payload in inserted_payloads if payload.get("stripe_subscription_id") == "sub_test_123"
+        )
+        assert subscription_payload["max_agents"] == 999999
+        assert subscription_payload["max_messages_per_day"] == 999999
 
     def test_subscription_update_with_cancellation(
         self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock
@@ -527,7 +530,7 @@ class TestWebhookEndpoints:
         """Stripe price metadata must use the current tier field."""
         subscription_data = self._create_subscription_data()
         subscription_data["items"]["data"][0]["price"]["metadata"] = {
-            "plan": "starter",
+            "plan": "byok",
             "billing_cycle": "monthly",
         }
         event = self._create_stripe_event("customer.subscription.created", subscription_data)

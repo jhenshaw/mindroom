@@ -74,18 +74,7 @@ def handle_subscription_created(subscription: dict) -> tuple[bool, str | None]:
     price_data = subscription["items"]["data"][0]["price"] if subscription.get("items", {}).get("data") else {}
     tier = _get_tier_from_price(price_data)
     _billing_cycle = _get_billing_cycle_from_price(price_data)
-    quantity = subscription["items"]["data"][0].get("quantity", 1) if subscription.get("items", {}).get("data") else 1
-
-    # Get plan limits
     limits = get_plan_limits_from_metadata(tier)
-
-    # Handle per-user limits for professional plan
-    if tier == "professional" and quantity > 1:
-        # Scale limits by user count
-        if limits.get("max_agents") and isinstance(limits["max_agents"], int):
-            limits["max_agents"] = limits["max_agents"] * quantity
-        if limits.get("max_messages_per_day") and isinstance(limits["max_messages_per_day"], int):
-            limits["max_messages_per_day"] = limits["max_messages_per_day"] * quantity
 
     # Prepare subscription data
     subscription_data = {
@@ -144,18 +133,7 @@ def handle_subscription_updated(subscription: dict) -> tuple[bool, str | None]:
     price_data = subscription["items"]["data"][0]["price"] if subscription.get("items", {}).get("data") else {}
     tier = _get_tier_from_price(price_data)
     _billing_cycle = _get_billing_cycle_from_price(price_data)
-    quantity = subscription["items"]["data"][0].get("quantity", 1) if subscription.get("items", {}).get("data") else 1
-
-    # Get plan limits
     limits = get_plan_limits_from_metadata(tier)
-
-    # Handle per-user limits for professional plan
-    if tier == "professional" and quantity > 1:
-        # Scale limits by user count
-        if limits.get("max_agents") and isinstance(limits["max_agents"], int):
-            limits["max_agents"] = limits["max_agents"] * quantity
-        if limits.get("max_messages_per_day") and isinstance(limits["max_messages_per_day"], int):
-            limits["max_messages_per_day"] = limits["max_messages_per_day"] * quantity
 
     # Prepare subscription data
     subscription_data = {

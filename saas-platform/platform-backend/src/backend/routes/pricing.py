@@ -48,7 +48,6 @@ async def get_pricing_config() -> dict[str, Any]:
             if isinstance(price_monthly, (int, float))
             else price_monthly,
             "price_yearly": f"${price_yearly / 100:.0f}" if isinstance(price_yearly, (int, float)) else price_yearly,
-            "price_model": plan_data.price_model or "flat",
             "description": plan_data.description,
             "features": plan_data.features,
             "limits": plan_data.limits.model_dump(),
@@ -68,7 +67,7 @@ async def get_stripe_price(plan: str, billing_cycle: str) -> dict[str, Any]:
     """Get the Stripe price ID for a specific plan and billing cycle.
 
     Args:
-        plan: Plan key (e.g., 'starter', 'professional')
+        plan: Plan key (e.g., 'byok', 'hobby', 'pro')
         billing_cycle: Either 'monthly' or 'yearly'
 
     Returns:

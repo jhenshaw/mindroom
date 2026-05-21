@@ -56,7 +56,6 @@ class Plan(BaseModel):
     stripe_price_id_monthly_live: str | None = None
     stripe_price_id_yearly_live: str | None = None
     recommended: bool = False
-    price_model: Literal["per_user"] | None = None
     included_ai_budget_usd: int = 0
     requires_customer_provider_keys: bool = False
     resource_profile: Literal["small", "pro"] = "small"
@@ -153,7 +152,7 @@ def get_stripe_price_id(plan: str, billing_cycle: str = "monthly") -> str | None
     """Get Stripe price ID for a specific plan and billing cycle.
 
     Args:
-        plan: Plan key (e.g., 'starter', 'professional')
+        plan: Plan key (e.g., 'byok', 'hobby', 'pro')
         billing_cycle: Either 'monthly' or 'yearly'
 
     Returns:
@@ -183,7 +182,7 @@ def get_plan_details(plan: str) -> Plan | None:
     """Get full details for a specific plan.
 
     Args:
-        plan: Plan key (e.g., 'starter', 'professional')
+        plan: Plan key (e.g., 'byok', 'hobby', 'pro')
 
     Returns:
         Plan object or None if not found
@@ -213,7 +212,7 @@ def get_plan_limits_from_metadata(tier: str) -> dict[str, Any]:
     """Get plan limits for a specific tier.
 
     Args:
-        tier: Plan tier (e.g., 'free', 'starter', 'professional', 'enterprise')
+        tier: Plan tier (e.g., 'free', 'byok', 'hobby', 'pro', 'enterprise')
 
     Returns:
         Dictionary of plan limits with keys like 'max_agents', 'max_messages_per_day'

@@ -358,4 +358,3 @@ class TestPricingIntegration:
         byok_monthly_id = "price_1TZQNK3GVsrZHuzX6EWO8kgD"
         assert get_stripe_price_id("byok", "monthly") == byok_monthly_id
         assert config_model.plans["byok"].stripe_price_id_monthly == byok_monthly_id
-        assert yaml_data["plans"]["byok"]["stripe_price_id_monthly"] == byok_monthly_id
