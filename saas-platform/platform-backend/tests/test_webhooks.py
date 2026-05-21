@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 import stripe
+from backend.pricing import get_stripe_price_id
 from fastapi.testclient import TestClient
 
 
@@ -132,6 +133,30 @@ class TestWebhookEndpoints:
 
         # Verify Supabase calls
         assert mock_supabase.table.call_count >= 3  # accounts, subscriptions check, insert
+
+    def test_subscription_created_uses_configured_price_id_over_stale_metadata(
+        self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock
+    ):
+        """Configured Stripe price IDs are authoritative over stale Stripe metadata."""
+        subscription_data = self._create_subscription_data(tier="starter")
+        price_data = subscription_data["items"]["data"][0]["price"]
+        price_data["id"] = get_stripe_price_id("byok", "monthly")
+        price_data["metadata"] = {"tier": "starter", "billing_cycle": "monthly"}
+        event = self._create_stripe_event("customer.subscription.created", subscription_data)
+        mock_stripe_signature.return_value = event
+
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"id": "account_123"})
+        mock_supabase.table().select().eq().execute.return_value = Mock(data=[])
+        mock_supabase.table().insert().execute.return_value = Mock()
+
+        response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
+
+        assert response.status_code == 200
+        result = response.json()
+        assert result["received"] is True
+        assert result["error"] is None
+        inserted_payloads = [call_.args[0] for call_ in mock_supabase.table().insert.call_args_list if call_.args]
+        assert any(payload.get("tier") == "byok" for payload in inserted_payloads)
 
     def test_subscription_created_no_account(
         self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock

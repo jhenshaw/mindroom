@@ -9,6 +9,7 @@ from backend.pricing import (
     PricingConfig,
     get_plan_details,
     get_stripe_price_id,
+    get_stripe_price_match,
     get_trial_days,
     is_trial_enabled_for_plan,
     load_pricing_config,
@@ -230,6 +231,20 @@ class TestPricingHelperFunctions:
         monkeypatch.setenv("STRIPE_SECRET_KEY_FILE", str(secret_file))
 
         assert get_stripe_price_id("byok", "monthly") == "price_1TZQNK3GVsrZHuzX6EWO8kgD"
+
+    def test_get_stripe_price_match_uses_configured_test_and_live_ids(self) -> None:
+        """Configured Stripe price IDs map back to canonical plan metadata."""
+        test_match = get_stripe_price_match("price_1TZQNK3GVsrZHuzX6EWO8kgD")
+        assert test_match is not None
+        assert test_match.tier == "byok"
+        assert test_match.billing_cycle == "monthly"
+
+        live_match = get_stripe_price_match("price_1TZQJK3GVsrZHuzXuazROiIy")
+        assert live_match is not None
+        assert live_match.tier == "byok"
+        assert live_match.billing_cycle == "yearly"
+
+        assert get_stripe_price_match("price_unknown") is None
 
     def test_get_plan_details(self) -> None:
         """Test getting plan details."""

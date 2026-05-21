@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -82,6 +83,14 @@ class PricingConfig(BaseModel):
     plans: dict[str, Plan]
     trial: Trial
     discounts: Discounts
+
+
+@dataclass(frozen=True)
+class StripePriceMatch:
+    """Canonical plan metadata for a configured Stripe price ID."""
+
+    tier: str
+    billing_cycle: Literal["monthly", "yearly"]
 
 
 def find_pricing_config_path() -> Path:
@@ -175,6 +184,20 @@ def get_stripe_price_id(plan: str, billing_cycle: str = "monthly") -> str | None
         return plan_obj.stripe_price_id_monthly
     if billing_cycle == "yearly":
         return plan_obj.stripe_price_id_yearly
+    return None
+
+
+def get_stripe_price_match(price_id: str | None) -> StripePriceMatch | None:
+    """Return canonical plan metadata for a configured Stripe price ID."""
+    if not price_id:
+        return None
+
+    config = load_pricing_config_model()
+    for tier, plan in config.plans.items():
+        if price_id in {plan.stripe_price_id_monthly, plan.stripe_price_id_monthly_live}:
+            return StripePriceMatch(tier=tier, billing_cycle="monthly")
+        if price_id in {plan.stripe_price_id_yearly, plan.stripe_price_id_yearly_live}:
+            return StripePriceMatch(tier=tier, billing_cycle="yearly")
     return None
 
 
