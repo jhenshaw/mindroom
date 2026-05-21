@@ -73,6 +73,24 @@ def test_owner_matrix_user_id_from_email_matches_synapse_oidc_template() -> None
     )
 
 
+@pytest.mark.parametrize("stored_limit", ["not-a-number", object()])
+def test_matching_openrouter_metadata_treats_invalid_stored_limit_as_cache_miss(stored_limit: object) -> None:
+    """Malformed advisory OpenRouter metadata should not block fresh provisioning."""
+    from backend.routes.provisioner import _matching_openrouter_metadata
+
+    assert (
+        _matching_openrouter_metadata(
+            {
+                "openrouter_key_hash": "hash_123",
+                "openrouter_key_limit_reset": "monthly",
+                "openrouter_key_limit_usd": stored_limit,
+            },
+            15,
+        )
+        is False
+    )
+
+
 async def _kubectl_without_credentials_encryption_secret(args: list[str], namespace: str | None = None):
     """Return an empty response for a missing existing instance API key Secret."""
     _ = namespace

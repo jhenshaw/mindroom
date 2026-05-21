@@ -388,10 +388,14 @@ def _matching_openrouter_metadata(row: Mapping[str, Any] | None, monthly_limit_u
     """Return whether stored OpenRouter metadata matches the requested budget."""
     if not row:
         return False
+    try:
+        stored_limit = int(row.get("openrouter_key_limit_usd") or 0)
+    except (TypeError, ValueError):
+        return False
     return (
         row.get("openrouter_key_hash") is not None
         and row.get("openrouter_key_limit_reset") == "monthly"
-        and int(row.get("openrouter_key_limit_usd") or 0) == monthly_limit_usd
+        and stored_limit == monthly_limit_usd
     )
 
 

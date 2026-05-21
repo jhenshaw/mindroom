@@ -62,6 +62,9 @@ def create_openrouter_key(
     if not management_api_key.strip():
         msg = "OPENROUTER_PROVISIONING_API_KEY is required to create included-budget OpenRouter keys"
         raise OpenRouterConfigurationError(msg)
+    if plan.monthly_limit_usd <= 0:
+        msg = "OpenRouter monthly_limit_usd must be greater than 0"
+        raise OpenRouterError(msg)
 
     body = json.dumps(
         {

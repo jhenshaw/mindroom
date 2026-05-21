@@ -80,6 +80,26 @@ def test_create_openrouter_key_rejects_missing_management_key() -> None:
     assert calls == 0
 
 
+@pytest.mark.parametrize("monthly_limit_usd", [0, -1])
+def test_create_openrouter_key_rejects_non_positive_budget(monthly_limit_usd: int) -> None:
+    """Invalid provisioning budgets should fail before making an OpenRouter request."""
+    calls = 0
+
+    def http_post(url: str, headers: dict[str, str], body: bytes) -> tuple[int, bytes]:  # noqa: ARG001
+        nonlocal calls
+        calls += 1
+        return 201, b"{}"
+
+    with pytest.raises(OpenRouterError, match="monthly_limit_usd must be greater than 0"):
+        create_openrouter_key(
+            management_api_key="sk-or-v1-management",
+            plan=OpenRouterKeyPlan(name="MindRoom instance 42", monthly_limit_usd=monthly_limit_usd),
+            http_post=http_post,
+        )
+
+    assert calls == 0
+
+
 def test_create_openrouter_key_rejects_error_response() -> None:
     """OpenRouter error responses should not leak secret values."""
 

@@ -347,8 +347,11 @@ export default function BillingPage() {
             .filter(([key]) => key !== 'free' && key !== 'enterprise')
             .map(([key, plan]) => {
               const isCurrentPlan = key === currentTier
-              const tierOrder = ['byok', 'hobby', 'pro']
-              const isDowngrade = tierOrder.indexOf(key) < tierOrder.indexOf(currentTier)
+              const tierOrder: PlanId[] = ['free', 'byok', 'hobby', 'pro', 'enterprise']
+              const currentTierRank = tierOrder.indexOf(currentTier)
+              const candidateTierRank = tierOrder.indexOf(key as PlanId)
+              const isDowngrade =
+                currentTierRank !== -1 && candidateTierRank !== -1 && candidateTierRank < currentTierRank
 
               return (
                 <div
