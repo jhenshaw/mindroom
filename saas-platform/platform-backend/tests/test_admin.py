@@ -409,8 +409,22 @@ class TestAdminEndpoints:
         data = response.json()
         assert "data" in data
 
-    def test_admin_dashboard_metrics(self, client: TestClient, mock_supabase: MagicMock, mock_verify_admin: Mock):
+    def test_admin_dashboard_metrics(
+        self,
+        client: TestClient,
+        mock_supabase: MagicMock,
+        mock_verify_admin: Mock,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
         """Test admin dashboard metrics."""
+        from backend import pricing
+        from backend.routes import admin
+
+        pricing_config = pricing.load_pricing_config()
+        pricing_config["plans"]["byok"]["price_monthly"] = 3100
+        pricing_config["plans"]["pro"]["price_monthly"] = 9700
+        monkeypatch.setattr(admin, "PRICING_CONFIG_MODEL", pricing.PricingConfig(**pricing_config))
+
         # Setup mock queries for each specific table call
         # Mock accounts query
         accounts_mock = MagicMock()
@@ -520,6 +534,7 @@ class TestAdminEndpoints:
         assert data["total_accounts"] == 100
         assert data["active_subscriptions"] == 70
         assert data["total_instances"] == 2  # We have 2 instances total in the mock
+        assert data["subscription_revenue"] == 128.0
 
     def test_admin_resource_not_in_allowlist(self, client: TestClient, mock_verify_admin: Mock):
         """Test admin accessing resource not in allowlist."""
