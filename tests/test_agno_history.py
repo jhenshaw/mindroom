@@ -749,12 +749,60 @@ async def test_prepare_history_for_run_forced_compaction_rewrites_session(tmp_pa
     state = read_scope_state(persisted, scope)
     assert state.last_summary_model == "summary-model"
     assert state.last_compacted_run_count == 4
+    assert state.compacted_run_ids == ("run-1", "run-2", "run-3", "run-4")
     assert state.force_compact_before_next_run is False
     assert state.last_compacted_at is not None
 
     assert prepared.replays_persisted_history is True
     assert len(prepared.compaction_outcomes) == 1
     assert prepared.compaction_outcomes[0].summary == "merged summary"
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_prunes_reintroduced_compacted_runs(tmp_path: Path) -> None:
+    """Compacted run tombstones should win over a later stale session write."""
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run("run-1"),
+            _completed_run("run-2"),
+        ],
+    )
+    write_scope_state(
+        session,
+        scope,
+        HistoryScopeState(
+            last_compacted_at="2026-01-01T00:00:00Z",
+            last_summary_model="summary-model",
+            last_compacted_run_count=1,
+            compacted_run_ids=("run-1",),
+        ),
+    )
+    storage.upsert_session(session)
+
+    prepared = await prepare_history_for_run_for_test(
+        agent=_agent(db=storage),
+        agent_name="test_agent",
+        full_prompt="Current prompt",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        storage=storage,
+        session=session,
+    )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert [run.run_id for run in persisted.runs or []] == ["run-2"]
+    assert prepared.replay_plan is not None
 
 
 @pytest.mark.asyncio
@@ -1223,6 +1271,66 @@ async def test_rewrite_retries_summary_with_smaller_chunk_after_timeout(tmp_path
 
     assert rewrite_result is not None
     assert len(summary_inputs) == 2
+    assert estimate_text_tokens(summary_inputs[1]) < estimate_text_tokens(summary_inputs[0])
+
+
+@pytest.mark.asyncio
+async def test_rewrite_keeps_shrinking_summary_chunks_after_repeated_timeouts(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    working_session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="user", content="u" * 16_000),
+                    Message(role="assistant", content="a" * 16_000),
+                ],
+            ),
+        ],
+    )
+    summary_inputs: list[str] = []
+
+    async def fake_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
+        summary_inputs.append(summary_input)
+        if len(summary_inputs) < 3:
+            msg = f"compaction summary timed out after {MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS}s"
+            raise RuntimeError(msg)
+        return SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))
+
+    with patch(
+        "mindroom.history.compaction._generate_compaction_summary",
+        new=AsyncMock(side_effect=fake_summary),
+    ):
+        rewrite_result = await _rewrite_working_session_for_compaction(
+            storage=storage,
+            persisted_session=working_session,
+            working_session=working_session,
+            summary_model=FakeModel(id="summary-model", provider="fake"),
+            summary_model_name="summary-model",
+            session_id="session-1",
+            scope=scope,
+            state=HistoryScopeState(force_compact_before_next_run=True),
+            history_settings=ResolvedHistorySettings(
+                policy=HistoryPolicy(mode="all"),
+                max_tool_calls_from_history=None,
+            ),
+            available_history_budget=None,
+            summary_input_budget=16_000,
+            before_tokens=0,
+            runs_before=1,
+            threshold_tokens=None,
+            summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            lifecycle_notice_event_id=None,
+            progress_callback=None,
+            collect_compaction_hook_messages=False,
+        )
+
+    assert rewrite_result is not None
+    assert len(summary_inputs) == 3
+    assert estimate_text_tokens(summary_inputs[2]) < estimate_text_tokens(summary_inputs[1])
     assert estimate_text_tokens(summary_inputs[1]) < estimate_text_tokens(summary_inputs[0])
 
 

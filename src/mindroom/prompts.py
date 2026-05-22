@@ -287,6 +287,8 @@ Rules:
 - Preserve all still-relevant information from <previous_summary>.
 - Add only the new information from <new_conversation>.
 - Keep unchanged wording verbatim when it is still correct so future prompt prefixes remain stable.
+- The compacted runs may be only an older prefix of a longer conversation. Do not claim a goal, status, or next step
+  is current unless the compacted input explicitly shows that it remains current after that prefix.
 - Never paraphrase away exact technical details such as file paths, function names, class names, commands, Matrix IDs, model names, config keys, numeric thresholds, ports, URLs, or error text.
 - Preserve tool activity when it matters to current state, especially file edits, commands, and tool results.
 - Do not invent facts.

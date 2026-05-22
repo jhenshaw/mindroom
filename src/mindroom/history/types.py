@@ -89,6 +89,7 @@ class HistoryScopeState:
     last_compacted_at: str | None = None
     last_summary_model: str | None = None
     last_compacted_run_count: int | None = None
+    compacted_run_ids: tuple[str, ...] = field(default_factory=tuple)
     force_compact_before_next_run: bool = False
 
 

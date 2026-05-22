@@ -230,11 +230,17 @@ def _parse_state(raw_state: dict[str, Any]) -> HistoryScopeState:
     compacted_at = raw_state.get("last_compacted_at")
     summary_model = raw_state.get("last_summary_model")
     compacted_run_count = raw_state.get("last_compacted_run_count")
+    compacted_run_ids = raw_state.get("compacted_run_ids")
     force_flag = raw_state.get("force_compact_before_next_run")
     return HistoryScopeState(
         last_compacted_at=compacted_at if isinstance(compacted_at, str) else None,
         last_summary_model=summary_model if isinstance(summary_model, str) else None,
         last_compacted_run_count=compacted_run_count if isinstance(compacted_run_count, int) else None,
+        compacted_run_ids=(
+            tuple(sorted({run_id for run_id in compacted_run_ids if isinstance(run_id, str) and run_id}))
+            if isinstance(compacted_run_ids, list)
+            else ()
+        ),
         force_compact_before_next_run=bool(force_flag),
     )
 
@@ -249,6 +255,8 @@ def _state_to_metadata(state: HistoryScopeState) -> dict[str, object]:
         payload["last_summary_model"] = state.last_summary_model
     if state.last_compacted_run_count is not None:
         payload["last_compacted_run_count"] = state.last_compacted_run_count
+    if state.compacted_run_ids:
+        payload["compacted_run_ids"] = list(state.compacted_run_ids)
     return payload
 
 
@@ -257,8 +265,63 @@ def _state_is_empty(state: HistoryScopeState) -> bool:
         state.last_compacted_at is None
         and state.last_summary_model is None
         and state.last_compacted_run_count is None
+        and not state.compacted_run_ids
         and not state.force_compact_before_next_run
     )
+
+
+def compacted_run_ids_with(state: HistoryScopeState, run_ids: Iterable[str]) -> tuple[str, ...]:
+    """Return the state tombstone set with additional compacted run ids."""
+    merged = set(state.compacted_run_ids)
+    merged.update(run_id for run_id in run_ids if run_id)
+    return tuple(sorted(merged))
+
+
+def remove_runs_by_id(
+    runs: Iterable[RunOutput | TeamRunOutput],
+    compacted_run_ids: Iterable[str],
+) -> list[RunOutput | TeamRunOutput]:
+    """Return runs with compacted run ids, and their child runs, removed."""
+    remove_ids = {run_id for run_id in compacted_run_ids if run_id}
+    if not remove_ids:
+        return list(runs)
+
+    run_list = list(runs)
+    changed = True
+    while changed:
+        changed = False
+        for run in run_list:
+            parent_run_id = run.parent_run_id
+            run_id = run.run_id
+            if not isinstance(parent_run_id, str) or not isinstance(run_id, str):
+                continue
+            if parent_run_id in remove_ids and run_id not in remove_ids:
+                remove_ids.add(run_id)
+                changed = True
+
+    return [
+        run
+        for run in run_list
+        if not (
+            (isinstance(run.run_id, str) and run.run_id in remove_ids)
+            or (isinstance(run.parent_run_id, str) and run.parent_run_id in remove_ids)
+        )
+    ]
+
+
+def prune_compacted_runs_from_session(
+    session: AgentSession | TeamSession,
+    state: HistoryScopeState,
+) -> bool:
+    """Remove any run that was already recorded as compacted in scope metadata."""
+    if not state.compacted_run_ids:
+        return False
+    runs = session.runs or []
+    pruned_runs = remove_runs_by_id(runs, state.compacted_run_ids)
+    if len(pruned_runs) == len(runs):
+        return False
+    session.runs = pruned_runs
+    return True
 
 
 def _read_preserved_scope_seen_event_ids(session: AgentSession | TeamSession, scope: HistoryScope) -> set[str]:

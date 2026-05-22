@@ -31,8 +31,10 @@ from pydantic import BaseModel
 from mindroom.cancellation import request_task_cancel
 from mindroom.constants import MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS
 from mindroom.history.storage import (
+    compacted_run_ids_with,
     metadata_with_merged_seen_event_ids,
     read_scope_state,
+    remove_runs_by_id,
     seen_event_ids_for_runs,
     update_scope_seen_event_ids,
     write_scope_state,
@@ -73,6 +75,7 @@ _EXCERPT_METADATA_OMIT_KEYS = frozenset(
 )
 _STANDARD_HISTORY_ROLES = frozenset({"user", "assistant", "tool"})
 _COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS = 1.0
+_MIN_RETRY_SUMMARY_INPUT_BUDGET = 1_000
 type _ToolDefinition = dict[str, object]
 
 
@@ -343,6 +346,7 @@ async def compact_scope_history(
         last_compacted_at=compacted_at,
         last_summary_model=_model_identifier(summary_model),
         last_compacted_run_count=rewrite_result.compacted_run_count,
+        compacted_run_ids=compacted_run_ids_with(state, rewrite_result.compacted_run_ids),
         force_compact_before_next_run=False,
     )
     write_scope_state(session, scope, new_state)
@@ -508,9 +512,15 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
         compacted_run_ids = {run.run_id for run in included_runs if isinstance(run.run_id, str) and run.run_id}
         compacted_seen_event_ids = sorted(seen_event_ids_for_runs(included_runs))
         working_session.summary = SessionSummary(summary=generated_summary.summary, updated_at=datetime.now(UTC))
+        working_state = read_scope_state(working_session, scope)
+        write_scope_state(
+            working_session,
+            scope,
+            replace(working_state, compacted_run_ids=compacted_run_ids_with(working_state, compacted_run_ids)),
+        )
         if compacted_seen_event_ids:
             update_scope_seen_event_ids(working_session, scope, compacted_seen_event_ids)
-        working_session.runs = _remove_runs_by_id(working_session.runs or [], compacted_run_ids)
+        working_session.runs = remove_runs_by_id(working_session.runs or [], compacted_run_ids)
         total_compacted_run_count += len(included_runs)
         all_compacted_run_ids.update(compacted_run_ids)
         if collect_compaction_hook_messages:
@@ -635,7 +645,7 @@ def _persist_compaction_progress(
         target_session.metadata,
         working_session.metadata,
     )
-    target_session.runs = _remove_runs_by_id(target_session.runs or [], compacted_run_ids)
+    target_session.runs = remove_runs_by_id(target_session.runs or [], compacted_run_ids)
     if sync_remaining_runs:
         target_session.runs = _sync_remaining_runs_from_working(
             target_session.runs or [],
@@ -990,12 +1000,12 @@ async def _generate_compaction_summary_with_retry(
     summary_prompt: str,
     timing_scope: str | None = None,
 ) -> _GeneratedSummaryChunk:
-    """Generate one summary chunk, retrying once with a smaller input when safe."""
+    """Generate one summary chunk, retrying with progressively smaller input when safe."""
     summary_input = initial_summary_input
     included_runs = initial_included_runs
     budget = summary_input_budget
-    last_error: Exception | None = None
-    for attempt in (1, 2):
+    attempt = 1
+    while True:
         estimated_input_tokens = estimate_text_tokens(summary_input)
         started = asyncio.get_running_loop().time()
         logger.info(
@@ -1032,9 +1042,8 @@ async def _generate_compaction_summary_with_retry(
                 duration_ms=duration_ms,
                 error=str(exc) or type(exc).__name__,
             )
-            last_error = exc
-            retry_budget = max(1_000, budget // 2)
-            if attempt == 1 and retry_budget < budget and _should_retry_smaller_summary_chunk(exc):
+            retry_budget = max(_MIN_RETRY_SUMMARY_INPUT_BUDGET, budget // 2)
+            if retry_budget < budget and _should_retry_smaller_summary_chunk(exc):
                 rebuilt_input, rebuilt_runs = _build_summary_input(
                     previous_summary=previous_summary,
                     compacted_runs=compactable_runs,
@@ -1045,6 +1054,7 @@ async def _generate_compaction_summary_with_retry(
                     summary_input = rebuilt_input
                     included_runs = rebuilt_runs
                     budget = retry_budget
+                    attempt += 1
                     continue
             raise
         duration_ms = int((asyncio.get_running_loop().time() - started) * 1000)
@@ -1061,8 +1071,6 @@ async def _generate_compaction_summary_with_retry(
             duration_ms=duration_ms,
         )
         return _GeneratedSummaryChunk(summary=summary, included_runs=included_runs)
-    assert last_error is not None
-    raise last_error
 
 
 def _should_retry_smaller_summary_chunk(error: Exception) -> bool:
@@ -1646,36 +1654,6 @@ def _estimated_message_chars(message: Message) -> int:
     content_chars = len(_render_message_content(message))
     tool_call_chars = len(stable_serialize(message.tool_calls)) if message.tool_calls else 0
     return content_chars + tool_call_chars + _estimate_message_media_chars(message)
-
-
-def _remove_runs_by_id(
-    runs: Sequence[RunOutput | TeamRunOutput],
-    compacted_run_ids: set[str],
-) -> list[RunOutput | TeamRunOutput]:
-    if not compacted_run_ids:
-        return list(runs)
-
-    remove_ids = set(compacted_run_ids)
-    changed = True
-    while changed:
-        changed = False
-        for run in runs:
-            parent_run_id = run.parent_run_id
-            run_id = run.run_id
-            if not isinstance(parent_run_id, str) or not isinstance(run_id, str):
-                continue
-            if parent_run_id in remove_ids and run_id not in remove_ids:
-                remove_ids.add(run_id)
-                changed = True
-
-    return [
-        run
-        for run in runs
-        if not (
-            (isinstance(run.run_id, str) and run.run_id in remove_ids)
-            or (isinstance(run.parent_run_id, str) and run.parent_run_id in remove_ids)
-        )
-    ]
 
 
 def _estimate_message_media_chars(message: Message) -> int:

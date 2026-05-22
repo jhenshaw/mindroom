@@ -40,6 +40,7 @@ from mindroom.history.policy import (
 from mindroom.history.storage import (
     clear_force_compaction_state,
     consume_pending_force_compaction_scope,
+    prune_compacted_runs_from_session,
     read_scope_state,
     set_force_compaction_state,
     write_scope_state,
@@ -1409,6 +1410,8 @@ def _prepare_scope_state_for_run(
     execution_plan: ResolvedHistoryExecutionPlan,
 ) -> HistoryScopeState:
     state = read_scope_state(session, scope)
+    if prune_compacted_runs_from_session(session, state):
+        storage.upsert_session(session)
     if consume_pending_force_compaction_scope(session, scope):
         state = set_force_compaction_state(session, scope, state, force=True)
         storage.upsert_session(session)
