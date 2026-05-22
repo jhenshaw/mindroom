@@ -155,19 +155,19 @@ class VoiceCoalescingGate:
 
     def enqueue_text_if_voice_pending(self, key: CoalescingKey, item: TextIngressItem) -> bool:
         """Append text to a live or claimed voice burst."""
-        claimed_text_buffers = self._claimed_text_buffers.get(key)
-        if claimed_text_buffers is not None:
-            for claimed_text_buffer in claimed_text_buffers:
-                if claimed_text_buffer.append(item):
-                    return True
-            self._prune_claimed_text_buffers(key)
-
         entry = self._entries.get(key)
         if entry is not None and entry.voices:
             item.pending_event.enqueue_time = time.time()
             entry.text_items.append(item)
             self._wake(entry)
             return True
+
+        claimed_text_buffers = self._claimed_text_buffers.get(key)
+        if claimed_text_buffers is not None:
+            for claimed_text_buffer in claimed_text_buffers:
+                if claimed_text_buffer.append(item):
+                    return True
+            self._prune_claimed_text_buffers(key)
 
         return False
 

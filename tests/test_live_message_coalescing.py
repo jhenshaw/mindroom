@@ -42,7 +42,7 @@ from mindroom.dispatch_handoff import (
     _build_batch_dispatch_event,
     build_dispatch_handoff,
 )
-from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND, VOICE_COALESCING_CLASS, VOICE_SOURCE_KIND
 from mindroom.handled_turns import HandledTurnState
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import (
@@ -1390,6 +1390,85 @@ async def test_pending_voice_handoff_does_not_delay_command_barrier() -> None:
 
     await _wait_for(lambda: calls == [["$text"], ["$command"]], deadline_seconds=0.2)
 
+    assert _coalescing_gate_is_idle(gate)
+
+
+@pytest.mark.asyncio
+async def test_room_scope_voice_front_coalesces_following_text() -> None:
+    """Room-scope voice-led batches should keep one user turn when text follows voice."""
+    room = _make_room()
+    voice = _text_event(event_id="$voice", body="voice transcript", server_timestamp=1000)
+    text = _text_event(event_id="$text", body="typed follow-up", server_timestamp=1001)
+    calls: list[list[str]] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        calls.append(list(batch.source_event_ids))
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    key = ("!room:localhost", None, "@user:localhost")
+
+    await gate.enqueue_many(
+        key,
+        [
+            PendingEvent(
+                event=voice,
+                room=room,
+                source_kind=VOICE_SOURCE_KIND,
+                coalescing_class=VOICE_COALESCING_CLASS,
+            ),
+            PendingEvent(event=text, room=room, source_kind="message"),
+        ],
+    )
+    await gate.drain_all()
+
+    assert calls == [["$voice", "$text"]]
+    assert _coalescing_gate_is_idle(gate)
+
+
+@pytest.mark.asyncio
+async def test_room_scope_voice_front_coalesces_multiple_voice_events() -> None:
+    """Room-scope voice bursts handed to the main gate together should dispatch once."""
+    room = _make_room()
+    first_voice = _text_event(event_id="$voice-1", body="first voice transcript", server_timestamp=1000)
+    second_voice = _text_event(event_id="$voice-2", body="second voice transcript", server_timestamp=1001)
+    calls: list[list[str]] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        calls.append(list(batch.source_event_ids))
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    key = ("!room:localhost", None, "@user:localhost")
+
+    await gate.enqueue_many(
+        key,
+        [
+            PendingEvent(
+                event=first_voice,
+                room=room,
+                source_kind=VOICE_SOURCE_KIND,
+                coalescing_class=VOICE_COALESCING_CLASS,
+            ),
+            PendingEvent(
+                event=second_voice,
+                room=room,
+                source_kind=VOICE_SOURCE_KIND,
+                coalescing_class=VOICE_COALESCING_CLASS,
+            ),
+        ],
+    )
+    await gate.drain_all()
+
+    assert calls == [["$voice-1", "$voice-2"]]
     assert _coalescing_gate_is_idle(gate)
 
 

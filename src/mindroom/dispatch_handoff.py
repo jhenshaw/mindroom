@@ -304,12 +304,35 @@ _SYNTHETIC_BATCH_INTERNAL_CONTENT_KEYS: frozenset[str] = frozenset(
 )
 
 
+def _set_synthetic_batch_thread(primary_content: dict[str, Any], thread_id: str | None) -> None:
+    relates_to = primary_content.get("m.relates_to")
+    if not isinstance(relates_to, dict):
+        return
+    if relates_to.get("rel_type") != "m.thread":
+        return
+    if thread_id is None:
+        updated_relates_to = dict(relates_to)
+        updated_relates_to.pop("rel_type", None)
+        updated_relates_to.pop("event_id", None)
+        if updated_relates_to:
+            primary_content["m.relates_to"] = updated_relates_to
+        else:
+            primary_content.pop("m.relates_to", None)
+        return
+    primary_content["m.relates_to"] = {
+        **relates_to,
+        "rel_type": "m.thread",
+        "event_id": thread_id,
+    }
+
+
 def _merge_batch_source(batch: CoalescedBatch) -> dict[str, Any]:
     primary_source: dict[str, Any] = batch.primary_event.source if isinstance(batch.primary_event.source, dict) else {}
     merged: dict[str, Any] = dict(primary_source)
     primary_content: dict[str, Any] = dict(merged.get("content", {})) if isinstance(merged.get("content"), dict) else {}
     for key in _SYNTHETIC_BATCH_INTERNAL_CONTENT_KEYS:
         primary_content.pop(key, None)
+    _set_synthetic_batch_thread(primary_content, batch.coalescing_key[1])
     payload = _batch_payload_metadata(batch)
     if payload.mentioned_user_ids:
         primary_content["m.mentions"] = {"user_ids": list(payload.mentioned_user_ids)}

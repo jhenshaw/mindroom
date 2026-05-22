@@ -55,6 +55,7 @@ class CoalescedBatch:
     room: nio.MatrixRoom
     primary_event: DispatchEvent
     requester_user_id: str
+    coalescing_key: CoalescingKey
     pending_events: tuple[PendingEvent, ...]
     prompt: str
     source_kind: str
@@ -88,7 +89,10 @@ def coalesced_prompt(message_bodies: list[str]) -> str:
     )
 
 
-def _batch_metadata(pending_events: list[PendingEvent]) -> tuple[str | None, bool, str, str | None]:
+def _batch_metadata(
+    pending_events: list[PendingEvent],
+    event_prompts: list[str],
+) -> tuple[str | None, bool, str, str | None]:
     original_sender: str | None = None
     raw_audio_fallback = False
     coalescing_class = (
@@ -96,11 +100,7 @@ def _batch_metadata(pending_events: list[PendingEvent]) -> tuple[str | None, boo
         if any(pending_event.coalescing_class == VOICE_COALESCING_CLASS for pending_event in pending_events)
         else TEXT_COALESCING_CLASS
     )
-    router_relay_prompts = [
-        pending_event.router_relay_prompt
-        for pending_event in pending_events
-        if pending_event.router_relay_prompt is not None
-    ]
+    has_router_relay_prompt = any(pending_event.router_relay_prompt is not None for pending_event in pending_events)
     for pending_event in pending_events:
         if not _pending_event_trusts_internal_payload(pending_event):
             continue
@@ -115,7 +115,7 @@ def _batch_metadata(pending_events: list[PendingEvent]) -> tuple[str | None, boo
             raw_audio_fallback = True
         if original_sender is not None and raw_audio_fallback:
             break
-    router_relay_prompt = coalesced_prompt(router_relay_prompts) if router_relay_prompts else None
+    router_relay_prompt = coalesced_prompt(event_prompts) if has_router_relay_prompt else None
     return original_sender, raw_audio_fallback, coalescing_class, router_relay_prompt
 
 
@@ -224,17 +224,18 @@ def build_coalesced_batch(key: CoalescingKey, pending_events: list[PendingEvent]
     """Build one normalized dispatch batch from queued pending events."""
     ordered_pending_events = list(pending_events)
     primary_pending_event = ordered_pending_events[-1]
+    event_prompts = [_pending_event_prompt(pending_event) for pending_event in ordered_pending_events]
     original_sender, raw_audio_fallback, coalescing_class, router_relay_prompt = _batch_metadata(
         ordered_pending_events,
+        event_prompts,
     )
     return CoalescedBatch(
         room=primary_pending_event.room,
         primary_event=primary_pending_event.event,
         requester_user_id=key[2],
+        coalescing_key=key,
         pending_events=tuple(ordered_pending_events),
-        prompt=coalesced_prompt(
-            [_pending_event_prompt(pending_event) for pending_event in ordered_pending_events],
-        ),
+        prompt=coalesced_prompt(event_prompts),
         source_kind=_batch_source_kind(ordered_pending_events),
         dispatch_policy_source_kind=_batch_dispatch_policy_source_kind(ordered_pending_events),
         hook_source=_batch_hook_source(ordered_pending_events),

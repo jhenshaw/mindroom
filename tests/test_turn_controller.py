@@ -532,6 +532,9 @@ async def test_active_text_and_trusted_voice_router_handoff_coalesce_in_one_batc
     assert set(batches[0].source_event_ids) == {"$typed-followup", "$voice-router-handoff"}
     assert "typed follow-up" in batches[0].prompt
     assert "canonical voice transcript" in batches[0].prompt
+    assert batches[0].router_relay_prompt is not None
+    assert "typed follow-up" in batches[0].router_relay_prompt
+    assert "canonical voice transcript" in batches[0].router_relay_prompt
     assert batches[0].coalescing_class == VOICE_COALESCING_CLASS
     assert batches[0].attachment_ids == ["voice-attachment"]
 

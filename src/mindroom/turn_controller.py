@@ -680,19 +680,26 @@ class TurnController:
             reply_to_event_id=prepared_event.event_id,
             event_source=prepared_event.source,
         )
-        if self._should_bypass_coalescing_for_active_thread_follow_up(
+        should_bypass_active_follow_up = self._should_bypass_coalescing_for_active_thread_follow_up(
             envelope=envelope,
             coalescing_class=coalescing_class,
+        )
+        voice_join_policy_source_kind = (
+            ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+            if should_bypass_active_follow_up
+            else envelope.dispatch_policy_source_kind
+        )
+        if await self._try_join_text_with_pending_voice(
+            room=room,
+            event=dispatch_event,
+            envelope=envelope,
+            coalescing_thread_id=coalescing_thread_id,
+            requester_user_id=requester_user_id,
+            dispatch_policy_source_kind=voice_join_policy_source_kind,
+            trust_internal_payload_metadata=resolved_trust_internal_payload_metadata,
         ):
-            if await self._try_join_active_text_with_pending_voice(
-                room=room,
-                event=dispatch_event,
-                envelope=envelope,
-                coalescing_thread_id=coalescing_thread_id,
-                requester_user_id=requester_user_id,
-                trust_internal_payload_metadata=resolved_trust_internal_payload_metadata,
-            ):
-                return
+            return
+        if should_bypass_active_follow_up:
             await self._enqueue_active_thread_follow_up(
                 room=room,
                 event=dispatch_event,
@@ -727,7 +734,7 @@ class TurnController:
                 queued_notice_reservation.cancel()
             raise
 
-    async def _try_join_active_text_with_pending_voice(
+    async def _try_join_text_with_pending_voice(
         self,
         *,
         room: nio.MatrixRoom,
@@ -735,11 +742,13 @@ class TurnController:
         envelope: MessageEnvelope,
         coalescing_thread_id: str | None,
         requester_user_id: str,
+        dispatch_policy_source_kind: str | None,
         trust_internal_payload_metadata: bool | None,
     ) -> bool:
-        """Keep normal active text with a raw voice burst still before downstream handoff."""
+        """Keep normal text with a raw voice burst still before downstream handoff."""
         can_join_voice_burst = (
             envelope.source_kind == MESSAGE_SOURCE_KIND
+            and dispatch_policy_source_kind in {None, ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND}
             and envelope.dispatch_policy_source_kind is None
             and envelope.hook_source is None
             and isinstance(event, nio.RoomMessageText | PreparedTextEvent)
@@ -757,7 +766,7 @@ class TurnController:
             event,
             room,
             source_kind=envelope.source_kind,
-            dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+            dispatch_policy_source_kind=dispatch_policy_source_kind,
             hook_source=envelope.hook_source,
             message_received_depth=envelope.message_received_depth,
             requester_user_id=requester_user_id,
@@ -1927,11 +1936,7 @@ class TurnController:
             if dispatch_timing is not None:
                 dispatch_timing.mark("gate_exit")
             retarget_start = time.monotonic()
-            batch_coalescing_key = await self._coalescing_key_for_event(
-                batch.room,
-                batch.primary_event,
-                batch.requester_user_id,
-            )
+            batch_coalescing_key = batch.coalescing_key
             canonical_key = (
                 batch.room.room_id,
                 self.deps.resolver.build_message_target(

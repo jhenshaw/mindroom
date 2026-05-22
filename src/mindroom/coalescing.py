@@ -266,6 +266,21 @@ class CoalescingGate:
         return [gate.queue.popleft().pending_event for _ in range(count)]
 
     @staticmethod
+    def _append_queued_event(gate: _GateEntry, queued_event: _QueuedEvent) -> None:
+        if queued_event.kind is not _QueueKind.NORMAL:
+            gate.queue.append(queued_event)
+            return
+        insert_index = len(gate.queue)
+        while insert_index > 0:
+            previous = gate.queue[insert_index - 1]
+            if previous.kind is not _QueueKind.NORMAL:
+                break
+            if previous.pending_event.enqueue_time <= queued_event.pending_event.enqueue_time:
+                break
+            insert_index -= 1
+        gate.queue.insert(insert_index, queued_event)
+
+    @staticmethod
     def _front_normal_run_length(gate: _GateEntry, *, coalesce_normal_events: bool) -> int:
         count = 0
         for queued in gate.queue:
@@ -275,6 +290,14 @@ class CoalescingGate:
                 break
             count += 1
         return count
+
+    @staticmethod
+    def _front_normal_run_starts_with_voice(gate: _GateEntry) -> bool:
+        return bool(
+            gate.queue
+            and gate.queue[0].kind is _QueueKind.NORMAL
+            and gate.queue[0].pending_event.coalescing_class == VOICE_COALESCING_CLASS,
+        )
 
     @staticmethod
     def _extend_candidate_with_grace_media(gate: _GateEntry, candidate_count: int) -> int:
@@ -475,7 +498,8 @@ class CoalescingGate:
         enqueue_start = time.monotonic()
         gate = self._get_or_create_gate(key)
         queued_events = [(self._queue_kind(pending_event), pending_event) for pending_event in pending_events]
-        gate.queue.extend(_QueuedEvent(kind, pending_event) for kind, pending_event in queued_events)
+        for kind, pending_event in queued_events:
+            self._append_queued_event(gate, _QueuedEvent(kind, pending_event))
         self._schedule_drain(key, gate)
         for kind, pending_event in queued_events:
             path = self._enqueue_path(kind)
@@ -742,7 +766,7 @@ class CoalescingGate:
                     )
                     continue
 
-                coalesce_normal_events = current_key[1] is not None
+                coalesce_normal_events = current_key[1] is not None or self._front_normal_run_starts_with_voice(gate)
                 await self._wait_for_debounce(gate, coalesce_normal_events=coalesce_normal_events)
                 bypass_grace = self._is_shutting_down() or gate.drain_all_requested
                 use_upload_grace = not bypass_grace and self._upload_grace_seconds() > 0
