@@ -630,6 +630,104 @@ async def test_voice_gate_drain_all_waits_for_claimed_flush_to_finish() -> None:
 
 
 @pytest.mark.asyncio
+async def test_voice_gate_rejects_inconsistent_flush_callback_for_live_burst() -> None:
+    """One live voice burst should have a single downstream handoff owner."""
+    gate = VoiceCoalescingGate(
+        debounce_seconds=lambda: 60.0,
+        is_shutting_down=lambda: False,
+    )
+    room = _threaded_room()
+    first_voice = _make_threaded_voice_event(event_id="$voice-first")
+    second_voice = _make_threaded_voice_event(event_id="$voice-second")
+    key = (room.room_id, "$thread_root", first_voice.sender)
+
+    async def flush_batch(_batch: VoiceIngressBatch) -> None:
+        return None
+
+    async def other_flush_batch(_batch: VoiceIngressBatch) -> None:
+        return None
+
+    first_task = asyncio.create_task(
+        gate.enqueue_voice(
+            key,
+            _voice_ingress_item(room, first_voice),
+            flush_batch=flush_batch,
+        ),
+    )
+    try:
+        for _ in range(50):
+            if gate.has_pending_voice_burst(key):
+                break
+            await asyncio.sleep(0)
+        assert gate.has_pending_voice_burst(key)
+
+        with pytest.raises(RuntimeError, match="inconsistent flush callback"):
+            await gate.enqueue_voice(
+                key,
+                _voice_ingress_item(room, second_voice),
+                flush_batch=other_flush_batch,
+            )
+
+        await gate.drain_all()
+        await asyncio.wait_for(first_task, timeout=1.0)
+    finally:
+        if not first_task.done():
+            first_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await first_task
+
+
+@pytest.mark.asyncio
+async def test_voice_gate_entry_mismatch_fails_waiter_and_releases_count() -> None:
+    """A violated voice-gate ownership invariant should not leave enqueue waiters hanging."""
+    gate = VoiceCoalescingGate(
+        debounce_seconds=lambda: 60.0,
+        is_shutting_down=lambda: False,
+    )
+    room = _threaded_room()
+    voice_event = _make_threaded_voice_event(event_id="$voice-mismatch")
+    key = (room.room_id, "$thread_root", voice_event.sender)
+
+    async def flush_batch(_batch: VoiceIngressBatch) -> None:
+        return None
+
+    enqueue_task = asyncio.create_task(
+        gate.enqueue_voice(
+            key,
+            _voice_ingress_item(room, voice_event),
+            flush_batch=flush_batch,
+        ),
+    )
+    results: list[object] | None = None
+    try:
+        for _ in range(50):
+            if key in gate._entries:
+                break
+            await asyncio.sleep(0)
+        entry = gate._entries.pop(key)
+        drain_task = entry.drain_task
+        assert drain_task is not None
+
+        entry.drain_all_requested = True
+        gate._wake(entry)
+
+        results = await asyncio.wait_for(
+            asyncio.gather(enqueue_task, drain_task, return_exceptions=True),
+            timeout=1.0,
+        )
+    finally:
+        if not enqueue_task.done():
+            enqueue_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await enqueue_task
+
+    assert results is not None
+    assert all(isinstance(result, RuntimeError) for result in results)
+    assert all("Voice coalescing drain entry mismatch" in str(result) for result in results)
+    assert not gate.has_pending_voice_burst(key)
+
+
+@pytest.mark.asyncio
 async def test_overlapping_claimed_voice_bursts_keep_late_text_on_original_claim(
     mock_home_bot: AgentBot,
 ) -> None:

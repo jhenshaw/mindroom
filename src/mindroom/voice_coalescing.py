@@ -6,7 +6,7 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Never
 
 from .coalescing_batch import close_pending_event_metadata
 
@@ -42,6 +42,11 @@ class TextIngressItem:
 
 def _close_text_ingress_item_metadata(items: list[TextIngressItem] | tuple[TextIngressItem, ...]) -> None:
     close_pending_event_metadata([item.pending_event for item in items])
+
+
+def _raise_voice_coalescing_drain_entry_mismatch() -> Never:
+    msg = "Voice coalescing drain entry mismatch"
+    raise RuntimeError(msg)
 
 
 @dataclass
@@ -203,6 +208,9 @@ class VoiceCoalescingGate:
             self._entries[key] = entry
         elif entry.flush_batch is None:
             entry.flush_batch = flush_batch
+        elif entry.flush_batch != flush_batch:
+            msg = "Voice coalescing burst received inconsistent flush callback"
+            raise RuntimeError(msg)
 
         done = asyncio.get_running_loop().create_future()
         self._pending_voice_counts[key] = self._pending_voice_counts.get(key, 0) + 1
@@ -286,9 +294,10 @@ class VoiceCoalescingGate:
         claimed_text_buffer: _ClaimedTextIngressBuffer | None = None
         try:
             await self._wait_for_debounce(entry)
-            claimed_entry = self._entries.pop(key, None)
+            claimed_entry = self._entries.get(key)
             if claimed_entry is not entry:
-                return
+                _raise_voice_coalescing_drain_entry_mismatch()
+            self._entries.pop(key, None)
             flush_batch = entry.flush_batch
             if flush_batch is None:
                 _close_text_ingress_item_metadata(entry.text_items)

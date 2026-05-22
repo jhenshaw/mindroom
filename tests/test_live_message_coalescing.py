@@ -1673,6 +1673,51 @@ async def test_queued_notice_metadata_coalesces_in_thread_batch_and_drops_extras
     assert _coalescing_gate_is_idle(gate)
 
 
+def test_blocking_solo_metadata_closes_queued_notice_before_batch_error() -> None:
+    """A batch that cannot dispatch should close all metadata, including queued notices."""
+    room = _make_room()
+    queued_reservation = MagicMock()
+    blocking_metadata_owner = MagicMock()
+    queued_metadata = (
+        PendingDispatchMetadata(
+            kind=QUEUED_NOTICE_METADATA_KIND,
+            payload=queued_reservation,
+            close=queued_reservation.cancel,
+            requires_solo_batch=True,
+        ),
+    )
+    blocking_metadata = (
+        PendingDispatchMetadata(
+            kind="blocking_test_metadata",
+            payload=blocking_metadata_owner,
+            close=blocking_metadata_owner.close,
+            requires_solo_batch=True,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="Pending dispatch metadata requires solo batches"):
+        build_coalesced_batch(
+            ("!room:localhost", "$thread", "@user:localhost"),
+            [
+                PendingEvent(
+                    event=_text_event(event_id="$queued", body="queued", server_timestamp=1000),
+                    room=room,
+                    source_kind="message",
+                    dispatch_metadata=queued_metadata,
+                ),
+                PendingEvent(
+                    event=_text_event(event_id="$blocking", body="blocking", server_timestamp=1001),
+                    room=room,
+                    source_kind="message",
+                    dispatch_metadata=blocking_metadata,
+                ),
+            ],
+        )
+
+    queued_reservation.cancel.assert_called_once()
+    blocking_metadata_owner.close.assert_called_once()
+
+
 @pytest.mark.asyncio
 async def test_overlapping_scheduled_checkins_coalesce(tmp_path: Path) -> None:
     """Scheduled turns should buffer behind an in-flight dispatch instead of bypassing the gate."""
