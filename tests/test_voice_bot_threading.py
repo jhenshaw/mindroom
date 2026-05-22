@@ -960,6 +960,112 @@ async def test_text_after_newer_live_voice_burst_stays_with_newer_burst(
 
 
 @pytest.mark.asyncio
+async def test_text_after_newer_claimed_voice_burst_stays_with_newer_burst(
+    mock_home_bot: AgentBot,
+) -> None:
+    """Text sent after multiple claimed voice bursts should attach to the newest open claim."""
+    bot = mock_home_bot
+    room = _threaded_room()
+    gate = VoiceCoalescingGate(
+        debounce_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    replace_turn_controller_deps(bot, voice_coalescing_gate=gate)
+
+    raw_key = (room.room_id, "$thread_root", "@user:example.com")
+    first_voice = _make_threaded_voice_event(event_id="$voice-v1")
+    second_voice = _make_threaded_voice_event(event_id="$voice-v2")
+    late_text = _threaded_prepared_text_event(
+        event_id="$late-text-for-v2",
+        body="late typed follow-up for v2",
+    )
+    _text_key, text_pending_event, _source_kind = await bot._turn_controller._build_pending_event_for_dispatch(
+        late_text,
+        room,
+        source_kind=MESSAGE_SOURCE_KIND,
+        dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+        requester_user_id="@user:example.com",
+        coalescing_key=raw_key,
+    )
+
+    flush_started = {
+        "$voice-v1": asyncio.Event(),
+        "$voice-v2": asyncio.Event(),
+    }
+    release_flush = {
+        "$voice-v1": asyncio.Event(),
+        "$voice-v2": asyncio.Event(),
+    }
+    flushed_event_ids: dict[str, set[str]] = {}
+
+    async def capture_pending_by_key(
+        pending_by_key: dict[tuple[str, str | None, str], list[tuple[float, PendingEvent]]],
+    ) -> None:
+        event_ids = {
+            pending_event.event.event_id
+            for pending_entries in pending_by_key.values()
+            for _received_at, pending_event in pending_entries
+        }
+        voice_event_id = next(event_id for event_id in event_ids if event_id.startswith("$voice-v"))
+        flushed_event_ids[voice_event_id] = event_ids
+
+    async def flush_batch(batch: VoiceIngressBatch) -> None:
+        voice_event_id = batch.voice_outcomes[0].item.event.event_id
+        flush_started[voice_event_id].set()
+        await release_flush[voice_event_id].wait()
+        await bot._turn_controller._flush_voice_ingress_batch(batch)
+
+    first_task = asyncio.create_task(
+        gate.enqueue_voice(
+            raw_key,
+            _voice_ingress_item(room, first_voice),
+            flush_batch=flush_batch,
+        ),
+    )
+    second_task: asyncio.Task[None] | None = None
+    try:
+        with (
+            patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()),
+            patch.object(
+                bot._turn_controller,
+                "_enqueue_voice_ingress_pending_events",
+                new=AsyncMock(side_effect=capture_pending_by_key),
+            ),
+        ):
+            await asyncio.wait_for(flush_started["$voice-v1"].wait(), timeout=1.0)
+            second_task = asyncio.create_task(
+                gate.enqueue_voice(
+                    raw_key,
+                    _voice_ingress_item(room, second_voice),
+                    flush_batch=flush_batch,
+                ),
+            )
+            await asyncio.wait_for(flush_started["$voice-v2"].wait(), timeout=1.0)
+
+            accepted = gate.enqueue_text_if_voice_pending(
+                raw_key,
+                TextIngressItem(pending_event=text_pending_event),
+            )
+            assert accepted
+
+            release_flush["$voice-v1"].set()
+            await asyncio.wait_for(first_task, timeout=1.0)
+            release_flush["$voice-v2"].set()
+            await asyncio.wait_for(second_task, timeout=1.0)
+    finally:
+        for release in release_flush.values():
+            release.set()
+        for task in (first_task, second_task):
+            if task is not None and not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+
+    assert "$late-text-for-v2" not in flushed_event_ids["$voice-v1"]
+    assert "$late-text-for-v2" in flushed_event_ids["$voice-v2"]
+
+
+@pytest.mark.asyncio
 async def test_claimed_voice_late_text_metadata_closes_when_flush_fails(
     mock_home_bot: AgentBot,
 ) -> None:
@@ -1036,8 +1142,8 @@ async def test_claimed_voice_late_text_metadata_closes_when_flush_fails(
 
 
 @pytest.mark.asyncio
-async def test_voice_normalization_error_marks_audio_source_handled(mock_home_bot: AgentBot) -> None:
-    """Failed raw voice normalization should still terminally handle the source event."""
+async def test_voice_normalization_error_does_not_mark_audio_source_handled(mock_home_bot: AgentBot) -> None:
+    """Failed raw voice normalization should remain replayable."""
     bot = mock_home_bot
     room = _threaded_room()
     voice_event = _make_threaded_voice_event(event_id="$voice-error")
@@ -1061,7 +1167,7 @@ async def test_voice_normalization_error_marks_audio_source_handled(mock_home_bo
     ):
         await bot._on_media_message(room, voice_event)
 
-    assert bot._turn_store.is_handled("$voice-error")
+    assert not bot._turn_store.is_handled("$voice-error")
 
 
 @pytest.mark.asyncio
@@ -1470,6 +1576,132 @@ async def test_retargeted_voice_text_batch_handoff_uses_resolved_voice_thread(
 
 
 @pytest.mark.asyncio
+async def test_retargeted_voice_room_text_batch_handoff_adds_resolved_voice_thread(
+    mock_home_bot: AgentBot,
+) -> None:
+    """A room-level typed primary should not erase the resolved thread from a retargeted voice batch."""
+    bot = mock_home_bot
+    room = _threaded_room()
+    voice_event = _make_threaded_voice_event(event_id="$voice-retargeted", thread_id="$pre_stt_thread")
+    normalized_voice = _normalized_voice_result(
+        event=voice_event,
+        text="retargeted transcript",
+        thread_id="$post_stt_thread",
+    )
+    text_event = PreparedTextEvent(
+        sender="@user:example.com",
+        event_id="$typed",
+        body="typed follow-up",
+        source={
+            "event_id": "$typed",
+            "sender": "@user:example.com",
+            "origin_server_ts": 1_712_350_000_000,
+            "type": "m.room.message",
+            "room_id": room.room_id,
+            "content": {
+                "body": "typed follow-up",
+                "msgtype": "m.text",
+            },
+        },
+        server_timestamp=1_712_350_000_000,
+    )
+    voice_key, voice_pending_event, _voice_source_kind = await bot._turn_controller._build_pending_event_for_dispatch(
+        normalized_voice.event,
+        room,
+        source_kind=VOICE_SOURCE_KIND,
+        requester_user_id="@user:example.com",
+        coalescing_key=(room.room_id, "$post_stt_thread", "@user:example.com"),
+        trust_internal_payload_metadata=True,
+        enqueue_time=1.0,
+    )
+    _text_key, text_pending_event, _text_source_kind = await bot._turn_controller._build_pending_event_for_dispatch(
+        text_event,
+        room,
+        source_kind=MESSAGE_SOURCE_KIND,
+        requester_user_id="@user:example.com",
+        coalescing_key=(room.room_id, "$post_stt_thread", "@user:example.com"),
+        enqueue_time=2.0,
+    )
+    batch = build_coalesced_batch(voice_key, [voice_pending_event, text_pending_event])
+    captured_handoffs: list[DispatchHandoff] = []
+
+    async def capture_handoff(handoff: DispatchHandoff, **_kwargs: object) -> None:
+        captured_handoffs.append(handoff)
+
+    with patch.object(bot._turn_controller, "_dispatch_handoff", new=AsyncMock(side_effect=capture_handoff)):
+        await bot._turn_controller.handle_coalesced_batch(batch)
+
+    assert len(captured_handoffs) == 1
+    handoff_event = captured_handoffs[0].event
+    assert handoff_event.source["content"]["m.relates_to"]["rel_type"] == "m.thread"
+    assert handoff_event.source["content"]["m.relates_to"]["event_id"] == "$post_stt_thread"
+
+
+@pytest.mark.asyncio
+async def test_retargeted_voice_plain_reply_text_batch_handoff_adds_resolved_voice_thread(
+    mock_home_bot: AgentBot,
+) -> None:
+    """A voice batch should preserve plain reply metadata while adding the resolved thread."""
+    bot = mock_home_bot
+    room = _threaded_room()
+    voice_event = _make_threaded_voice_event(event_id="$voice-retargeted", thread_id="$pre_stt_thread")
+    normalized_voice = _normalized_voice_result(
+        event=voice_event,
+        text="retargeted transcript",
+        thread_id="$post_stt_thread",
+    )
+    text_event = PreparedTextEvent(
+        sender="@user:example.com",
+        event_id="$typed",
+        body="typed follow-up",
+        source={
+            "event_id": "$typed",
+            "sender": "@user:example.com",
+            "origin_server_ts": 1_712_350_000_000,
+            "type": "m.room.message",
+            "room_id": room.room_id,
+            "content": {
+                "body": "typed follow-up",
+                "msgtype": "m.text",
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$plain_reply_parent"}},
+            },
+        },
+        server_timestamp=1_712_350_000_000,
+    )
+    voice_key, voice_pending_event, _voice_source_kind = await bot._turn_controller._build_pending_event_for_dispatch(
+        normalized_voice.event,
+        room,
+        source_kind=VOICE_SOURCE_KIND,
+        requester_user_id="@user:example.com",
+        coalescing_key=(room.room_id, "$post_stt_thread", "@user:example.com"),
+        trust_internal_payload_metadata=True,
+        enqueue_time=1.0,
+    )
+    _text_key, text_pending_event, _text_source_kind = await bot._turn_controller._build_pending_event_for_dispatch(
+        text_event,
+        room,
+        source_kind=MESSAGE_SOURCE_KIND,
+        requester_user_id="@user:example.com",
+        coalescing_key=(room.room_id, "$post_stt_thread", "@user:example.com"),
+        enqueue_time=2.0,
+    )
+    batch = build_coalesced_batch(voice_key, [voice_pending_event, text_pending_event])
+    captured_handoffs: list[DispatchHandoff] = []
+
+    async def capture_handoff(handoff: DispatchHandoff, **_kwargs: object) -> None:
+        captured_handoffs.append(handoff)
+
+    with patch.object(bot._turn_controller, "_dispatch_handoff", new=AsyncMock(side_effect=capture_handoff)):
+        await bot._turn_controller.handle_coalesced_batch(batch)
+
+    assert len(captured_handoffs) == 1
+    relates_to = captured_handoffs[0].event.source["content"]["m.relates_to"]
+    assert relates_to["rel_type"] == "m.thread"
+    assert relates_to["event_id"] == "$post_stt_thread"
+    assert relates_to["m.in_reply_to"]["event_id"] == "$plain_reply_parent"
+
+
+@pytest.mark.asyncio
 async def test_raw_voice_burst_sent_during_streaming_waits_for_all_transcripts(
     mock_home_bot: AgentBot,
 ) -> None:
@@ -1637,6 +1869,280 @@ async def test_text_then_raw_voice_sent_during_streaming_coalesces_after_all_tra
     assert "typed follow-up" in followup_prompt
     assert "transcript for $voice1" in followup_prompt
     assert "transcript for $voice2" in followup_prompt
+
+
+@pytest.mark.asyncio
+async def test_text_before_retargeted_raw_voice_during_streaming_coalesces_on_voice_thread(
+    mock_home_bot: AgentBot,
+) -> None:
+    """Text already in the main gate should follow a later raw voice handoff retarget."""
+    bot = mock_home_bot
+    room = _threaded_room()
+    _install_streaming_test_gate(bot)
+
+    typed_followup = _threaded_prepared_text_event(
+        event_id="$typed",
+        body="typed follow-up",
+        thread_id="$pre_stt_thread",
+    )
+    voice_event = _make_threaded_voice_event(event_id="$voice1", thread_id="$pre_stt_thread")
+    prepare_started = asyncio.Event()
+    release_stt = asyncio.Event()
+    streaming_started = asyncio.Event()
+    release_streaming = asyncio.Event()
+    dispatches: list[tuple[list[str], str, str | None]] = []
+
+    async def prepare_voice_event(
+        request: inbound_turn_normalizer.VoiceNormalizationRequest,
+    ) -> inbound_turn_normalizer.VoiceNormalizationResult:
+        prepare_started.set()
+        await release_stt.wait()
+        return _normalized_voice_result(
+            event=request.event,
+            text="retargeted transcript",
+            thread_id="$post_stt_thread",
+        )
+
+    async def record_dispatch(
+        _room: nio.MatrixRoom,
+        dispatched_event: PreparedTextEvent | nio.RoomMessageText,
+        _requester_user_id: str,
+        *,
+        handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
+    ) -> None:
+        source_event_ids = _handled_source_event_ids(handled_turn)
+        content = dispatched_event.source.get("content") if isinstance(dispatched_event.source, dict) else None
+        relates_to = content.get("m.relates_to") if isinstance(content, dict) else None
+        thread_id = relates_to.get("event_id") if isinstance(relates_to, dict) else None
+        dispatches.append((source_event_ids, dispatched_event.body, thread_id))
+        if source_event_ids == ["$streaming"]:
+            streaming_started.set()
+            await release_streaming.wait()
+
+    streaming_event = _threaded_prepared_text_event(
+        event_id="$streaming",
+        body="still streaming",
+        thread_id="$pre_stt_thread",
+    )
+    voice_task: asyncio.Task[None] | None = None
+    try:
+        with (
+            patch.object(
+                bot._turn_controller,
+                "_dispatch_text_message",
+                new=AsyncMock(side_effect=record_dispatch),
+            ),
+            patch.object(
+                bot._turn_controller.deps.resolver,
+                "coalescing_thread_id",
+                new=AsyncMock(return_value="$pre_stt_thread"),
+            ),
+            patch.object(
+                bot._turn_controller.deps.normalizer,
+                "prepare_voice_event",
+                new=AsyncMock(side_effect=prepare_voice_event),
+            ),
+            patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()),
+            patch(
+                "mindroom.turn_controller.interactive.handle_text_response",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+        ):
+            await bot._turn_controller._enqueue_for_dispatch(
+                streaming_event,
+                room,
+                source_kind=MESSAGE_SOURCE_KIND,
+                requester_user_id="@user:example.com",
+                coalescing_key=(room.room_id, "$pre_stt_thread", "@user:example.com"),
+            )
+            await asyncio.wait_for(streaming_started.wait(), timeout=1.0)
+
+            await bot._turn_controller._dispatch_prepared_text_like_ingress(
+                room=room,
+                prepared_event=typed_followup,
+                dispatch_event=typed_followup,
+                requester_user_id="@user:example.com",
+                dispatch_timing=None,
+            )
+            voice_task = asyncio.create_task(bot._on_media_message(room, voice_event))
+            await asyncio.wait_for(prepare_started.wait(), timeout=1.0)
+
+            release_stt.set()
+            release_streaming.set()
+            await asyncio.wait_for(voice_task, timeout=1.0)
+            await drain_coalescing(bot)
+    finally:
+        release_stt.set()
+        release_streaming.set()
+        if voice_task is not None and not voice_task.done():
+            voice_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await voice_task
+
+    assert len(dispatches) == 2
+    followup_ids, followup_prompt, followup_thread_id = dispatches[1]
+    assert set(followup_ids) == {"$typed", "$voice1"}
+    assert "typed follow-up" in followup_prompt
+    assert "retargeted transcript" in followup_prompt
+    assert followup_thread_id == "$post_stt_thread"
+
+
+@pytest.mark.asyncio
+async def test_retargeted_voice_waits_for_later_raw_voice_pending_under_original_key(  # noqa: PLR0915
+    mock_home_bot: AgentBot,
+) -> None:
+    """A retargeted first voice handoff should still wait for later raw voice under the pre-STT key."""
+    bot = mock_home_bot
+    room = _threaded_room()
+    voice_gate = VoiceCoalescingGate(
+        debounce_seconds=lambda: 0.01,
+        is_shutting_down=lambda: False,
+    )
+    gate = CoalescingGate(
+        dispatch_batch=bot._dispatch_coalesced_batch,
+        debounce_seconds=lambda: 0.01,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+        has_pending_voice_handoff=voice_gate.has_pending_voice_burst,
+    )
+    replace_turn_controller_deps(bot, coalescing_gate=gate, voice_coalescing_gate=voice_gate)
+    bot._turn_controller.deps.response_runner.has_active_response_for_target = MagicMock(return_value=True)
+    bot._turn_controller.deps.response_runner.reserve_waiting_human_message = MagicMock(return_value=None)
+
+    typed_followup = _threaded_prepared_text_event(
+        event_id="$typed",
+        body="typed follow-up",
+        thread_id="$pre_stt_thread",
+    )
+    first_voice = _make_threaded_voice_event(event_id="$voice1", thread_id="$pre_stt_thread")
+    second_voice = _make_threaded_voice_event(event_id="$voice2", thread_id="$pre_stt_thread")
+    streaming_event = _threaded_prepared_text_event(
+        event_id="$streaming",
+        body="still streaming",
+        thread_id="$pre_stt_thread",
+    )
+    raw_key = (room.room_id, "$pre_stt_thread", "@user:example.com")
+    started = {"$voice1": asyncio.Event(), "$voice2": asyncio.Event()}
+    releases = {"$voice1": asyncio.Event(), "$voice2": asyncio.Event()}
+    streaming_started = asyncio.Event()
+    release_streaming = asyncio.Event()
+    dispatches: list[tuple[list[str], str, str | None]] = []
+
+    async def prepare_voice_event(
+        request: inbound_turn_normalizer.VoiceNormalizationRequest,
+    ) -> inbound_turn_normalizer.VoiceNormalizationResult:
+        started[request.event.event_id].set()
+        await releases[request.event.event_id].wait()
+        return _normalized_voice_result(
+            event=request.event,
+            text=f"retargeted transcript for {request.event.event_id}",
+            thread_id="$post_stt_thread",
+        )
+
+    async def wait_for_voice_claim() -> None:
+        deadline = asyncio.get_running_loop().time() + 1.0
+        while asyncio.get_running_loop().time() < deadline:
+            if raw_key not in voice_gate._entries and voice_gate.has_pending_voice_burst(raw_key):
+                return
+            await asyncio.sleep(0.001)
+        pytest.fail("first voice burst was not claimed before second voice")
+
+    async def record_dispatch(
+        _room: nio.MatrixRoom,
+        dispatched_event: PreparedTextEvent | nio.RoomMessageText,
+        _requester_user_id: str,
+        *,
+        handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
+    ) -> None:
+        source_event_ids = _handled_source_event_ids(handled_turn)
+        content = dispatched_event.source.get("content") if isinstance(dispatched_event.source, dict) else None
+        relates_to = content.get("m.relates_to") if isinstance(content, dict) else None
+        thread_id = relates_to.get("event_id") if isinstance(relates_to, dict) else None
+        dispatches.append((source_event_ids, dispatched_event.body, thread_id))
+        if source_event_ids == ["$streaming"]:
+            streaming_started.set()
+            await release_streaming.wait()
+
+    first_task: asyncio.Task[None] | None = None
+    second_task: asyncio.Task[None] | None = None
+    try:
+        with (
+            patch.object(
+                bot._turn_controller,
+                "_dispatch_text_message",
+                new=AsyncMock(side_effect=record_dispatch),
+            ),
+            patch.object(
+                bot._turn_controller.deps.resolver,
+                "coalescing_thread_id",
+                new=AsyncMock(return_value="$pre_stt_thread"),
+            ),
+            patch.object(
+                bot._turn_controller.deps.normalizer,
+                "prepare_voice_event",
+                new=AsyncMock(side_effect=prepare_voice_event),
+            ),
+            patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()),
+            patch(
+                "mindroom.turn_controller.interactive.handle_text_response",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+        ):
+            await bot._turn_controller._enqueue_for_dispatch(
+                streaming_event,
+                room,
+                source_kind=MESSAGE_SOURCE_KIND,
+                requester_user_id="@user:example.com",
+                coalescing_key=raw_key,
+            )
+            await asyncio.wait_for(streaming_started.wait(), timeout=1.0)
+
+            await bot._turn_controller._dispatch_prepared_text_like_ingress(
+                room=room,
+                prepared_event=typed_followup,
+                dispatch_event=typed_followup,
+                requester_user_id="@user:example.com",
+                dispatch_timing=None,
+            )
+            first_task = asyncio.create_task(bot._on_media_message(room, first_voice))
+            await asyncio.wait_for(started["$voice1"].wait(), timeout=1.0)
+            await wait_for_voice_claim()
+            second_task = asyncio.create_task(bot._on_media_message(room, second_voice))
+            await asyncio.wait_for(started["$voice2"].wait(), timeout=1.0)
+
+            releases["$voice1"].set()
+            await asyncio.wait_for(first_task, timeout=1.0)
+            release_streaming.set()
+            await asyncio.sleep(0.05)
+
+            assert dispatches == [(["$streaming"], "still streaming", "$pre_stt_thread")]
+
+            releases["$voice2"].set()
+            await asyncio.wait_for(second_task, timeout=1.0)
+            await drain_coalescing(bot)
+    finally:
+        release_streaming.set()
+        for release in releases.values():
+            release.set()
+        for task in (first_task, second_task):
+            if task is not None and not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+
+    assert len(dispatches) == 2
+    followup_ids, followup_prompt, followup_thread_id = dispatches[1]
+    assert set(followup_ids) == {"$typed", "$voice1", "$voice2"}
+    assert "typed follow-up" in followup_prompt
+    assert "retargeted transcript for $voice1" in followup_prompt
+    assert "retargeted transcript for $voice2" in followup_prompt
+    assert followup_thread_id == "$post_stt_thread"
 
 
 @pytest.mark.asyncio

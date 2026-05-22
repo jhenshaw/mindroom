@@ -304,11 +304,27 @@ _SYNTHETIC_BATCH_INTERNAL_CONTENT_KEYS: frozenset[str] = frozenset(
 )
 
 
-def _set_synthetic_batch_thread(primary_content: dict[str, Any], thread_id: str | None) -> None:
+def _set_synthetic_batch_thread(
+    primary_content: dict[str, Any],
+    thread_id: str | None,
+    *,
+    add_missing_thread: bool,
+) -> None:
     relates_to = primary_content.get("m.relates_to")
     if not isinstance(relates_to, dict):
+        if thread_id is not None and add_missing_thread:
+            primary_content["m.relates_to"] = {
+                "rel_type": "m.thread",
+                "event_id": thread_id,
+            }
         return
     if relates_to.get("rel_type") != "m.thread":
+        if thread_id is not None and add_missing_thread:
+            primary_content["m.relates_to"] = {
+                **relates_to,
+                "rel_type": "m.thread",
+                "event_id": thread_id,
+            }
         return
     if thread_id is None:
         updated_relates_to = dict(relates_to)
@@ -327,12 +343,18 @@ def _set_synthetic_batch_thread(primary_content: dict[str, Any], thread_id: str 
 
 
 def _merge_batch_source(batch: CoalescedBatch) -> dict[str, Any]:
-    primary_source: dict[str, Any] = batch.primary_event.source if isinstance(batch.primary_event.source, dict) else {}
-    merged: dict[str, Any] = dict(primary_source)
+    carrier_source: dict[str, Any] = (
+        batch.dispatch_carrier_event.source if isinstance(batch.dispatch_carrier_event.source, dict) else {}
+    )
+    merged: dict[str, Any] = dict(carrier_source)
     primary_content: dict[str, Any] = dict(merged.get("content", {})) if isinstance(merged.get("content"), dict) else {}
     for key in _SYNTHETIC_BATCH_INTERNAL_CONTENT_KEYS:
         primary_content.pop(key, None)
-    _set_synthetic_batch_thread(primary_content, batch.coalescing_key[1])
+    _set_synthetic_batch_thread(
+        primary_content,
+        batch.coalescing_key[1],
+        add_missing_thread=batch.coalescing_class == VOICE_COALESCING_CLASS,
+    )
     payload = _batch_payload_metadata(batch)
     if payload.mentioned_user_ids:
         primary_content["m.mentions"] = {"user_ids": list(payload.mentioned_user_ids)}
@@ -366,11 +388,11 @@ def _build_batch_dispatch_event(batch: CoalescedBatch) -> TextDispatchEvent:
             return _single_prepared_dispatch_event(batch.primary_event, batch.source_kind)
         return batch.primary_event
     return PreparedTextEvent(
-        sender=batch.primary_event.sender,
-        event_id=batch.primary_event.event_id,
+        sender=batch.dispatch_carrier_event.sender,
+        event_id=batch.dispatch_carrier_event.event_id,
         body=batch.prompt,
         source=_merge_batch_source(batch),
-        server_timestamp=batch.primary_event.server_timestamp,
+        server_timestamp=batch.dispatch_carrier_event.server_timestamp,
         source_kind_override=batch.source_kind,
     )
 

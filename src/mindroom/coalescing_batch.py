@@ -21,6 +21,7 @@ from .dispatch_source import (
     IMAGE_SOURCE_KIND,
     MEDIA_SOURCE_KIND,
     TEXT_COALESCING_CLASS,
+    TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_COALESCING_CLASS,
     VOICE_SOURCE_KIND,
 )
@@ -54,6 +55,7 @@ class CoalescedBatch:
 
     room: nio.MatrixRoom
     primary_event: DispatchEvent
+    dispatch_carrier_event: DispatchEvent
     requester_user_id: str
     coalescing_key: CoalescingKey
     pending_events: tuple[PendingEvent, ...]
@@ -120,9 +122,10 @@ def _batch_metadata(
 
 
 _SOURCE_KIND_PRIORITY: dict[str, int] = {
-    VOICE_SOURCE_KIND: 0,
-    IMAGE_SOURCE_KIND: 1,
-    MEDIA_SOURCE_KIND: 2,
+    TRUSTED_INTERNAL_RELAY_SOURCE_KIND: 0,
+    VOICE_SOURCE_KIND: 1,
+    IMAGE_SOURCE_KIND: 2,
+    MEDIA_SOURCE_KIND: 3,
 }
 
 
@@ -224,6 +227,17 @@ def build_coalesced_batch(key: CoalescingKey, pending_events: list[PendingEvent]
     """Build one normalized dispatch batch from queued pending events."""
     ordered_pending_events = list(pending_events)
     primary_pending_event = ordered_pending_events[-1]
+    source_kind = _batch_source_kind(ordered_pending_events)
+    dispatch_carrier_pending_event = primary_pending_event
+    if source_kind == TRUSTED_INTERNAL_RELAY_SOURCE_KIND:
+        dispatch_carrier_pending_event = next(
+            (
+                pending_event
+                for pending_event in ordered_pending_events
+                if pending_event.source_kind == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+            ),
+            primary_pending_event,
+        )
     event_prompts = [_pending_event_prompt(pending_event) for pending_event in ordered_pending_events]
     original_sender, raw_audio_fallback, coalescing_class, router_relay_prompt = _batch_metadata(
         ordered_pending_events,
@@ -232,11 +246,12 @@ def build_coalesced_batch(key: CoalescingKey, pending_events: list[PendingEvent]
     return CoalescedBatch(
         room=primary_pending_event.room,
         primary_event=primary_pending_event.event,
+        dispatch_carrier_event=dispatch_carrier_pending_event.event,
         requester_user_id=key[2],
         coalescing_key=key,
         pending_events=tuple(ordered_pending_events),
         prompt=coalesced_prompt(event_prompts),
-        source_kind=_batch_source_kind(ordered_pending_events),
+        source_kind=source_kind,
         dispatch_policy_source_kind=_batch_dispatch_policy_source_kind(ordered_pending_events),
         hook_source=_batch_hook_source(ordered_pending_events),
         message_received_depth=_batch_message_received_depth(ordered_pending_events),

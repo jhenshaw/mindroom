@@ -1431,6 +1431,43 @@ async def test_room_scope_voice_front_coalesces_following_text() -> None:
 
 
 @pytest.mark.asyncio
+async def test_room_scope_text_front_coalesces_following_voice() -> None:
+    """Room-scope text should join a following voice event from the same burst."""
+    room = _make_room()
+    text = _text_event(event_id="$text", body="typed follow-up", server_timestamp=1000)
+    voice = _text_event(event_id="$voice", body="voice transcript", server_timestamp=1001)
+    calls: list[list[str]] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        calls.append(list(batch.source_event_ids))
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    key = ("!room:localhost", None, "@user:localhost")
+
+    await gate.enqueue_many(
+        key,
+        [
+            PendingEvent(event=text, room=room, source_kind="message"),
+            PendingEvent(
+                event=voice,
+                room=room,
+                source_kind=VOICE_SOURCE_KIND,
+                coalescing_class=VOICE_COALESCING_CLASS,
+            ),
+        ],
+    )
+    await gate.drain_all()
+
+    assert calls == [["$text", "$voice"]]
+    assert _coalescing_gate_is_idle(gate)
+
+
+@pytest.mark.asyncio
 async def test_room_scope_voice_front_coalesces_multiple_voice_events() -> None:
     """Room-scope voice bursts handed to the main gate together should dispatch once."""
     room = _make_room()

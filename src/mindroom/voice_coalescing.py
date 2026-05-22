@@ -147,11 +147,35 @@ class VoiceCoalescingGate:
         self._entries: dict[CoalescingKey, _VoiceBurstEntry] = {}
         self._claimed_text_buffers: dict[CoalescingKey, list[_ClaimedTextIngressBuffer]] = {}
         self._pending_voice_counts: dict[CoalescingKey, int] = {}
+        self._pending_voice_handoff_aliases: dict[CoalescingKey, set[CoalescingKey]] = {}
         self._drain_tasks: set[asyncio.Task[None]] = set()
 
     def has_pending_voice_burst(self, key: CoalescingKey) -> bool:
         """Return whether raw voice for this key is waiting on debounce, STT, flush, or handoff."""
-        return self._pending_voice_counts.get(key, 0) > 0
+        if self._pending_voice_counts.get(key, 0) > 0:
+            return True
+        return self._has_pending_aliased_voice_burst(key)
+
+    def alias_pending_voice_handoff(self, old_key: CoalescingKey, new_key: CoalescingKey) -> None:
+        """Let a resolved downstream key wait for raw voice still tracked by the original key."""
+        if old_key == new_key or self._pending_voice_counts.get(old_key, 0) <= 0:
+            return
+        self._pending_voice_handoff_aliases.setdefault(new_key, set()).add(old_key)
+
+    def _has_pending_aliased_voice_burst(self, key: CoalescingKey) -> bool:
+        aliases = self._pending_voice_handoff_aliases.get(key)
+        if aliases is None:
+            return False
+        live_aliases = {alias for alias in aliases if self._pending_voice_counts.get(alias, 0) > 0}
+        if live_aliases:
+            self._pending_voice_handoff_aliases[key] = live_aliases
+            return True
+        self._pending_voice_handoff_aliases.pop(key, None)
+        return False
+
+    def _prune_pending_voice_handoff_aliases(self) -> None:
+        for key in tuple(self._pending_voice_handoff_aliases):
+            self._has_pending_aliased_voice_burst(key)
 
     def enqueue_text_if_voice_pending(self, key: CoalescingKey, item: TextIngressItem) -> bool:
         """Append text to a live or claimed voice burst."""
@@ -164,7 +188,7 @@ class VoiceCoalescingGate:
 
         claimed_text_buffers = self._claimed_text_buffers.get(key)
         if claimed_text_buffers is not None:
-            for claimed_text_buffer in claimed_text_buffers:
+            for claimed_text_buffer in reversed(claimed_text_buffers):
                 if claimed_text_buffer.append(item):
                     return True
             self._prune_claimed_text_buffers(key)
@@ -226,6 +250,7 @@ class VoiceCoalescingGate:
             self._pending_voice_counts[key] = remaining_count
             return
         self._pending_voice_counts.pop(key, None)
+        self._prune_pending_voice_handoff_aliases()
 
     async def drain_all(self) -> None:
         """Force every pending voice burst to flush and await its drain task."""

@@ -540,6 +540,82 @@ async def test_active_text_and_trusted_voice_router_handoff_coalesce_in_one_batc
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("event_order", ["text-first", "voice-first"])
+async def test_mixed_text_and_trusted_voice_router_handoff_dispatches_with_relay_context(
+    tmp_path: Path,
+    event_order: str,
+) -> None:
+    """Coalesced router-routed voice plus text should keep router relay semantics in either order."""
+    bot = _make_general_bot(tmp_path)
+    room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_general:localhost")
+    generated_prompts: list[str] = []
+    generated_envelopes: list[MessageEnvelope] = []
+
+    async def generate_response(**kwargs: object) -> str:
+        generated_prompts.append(str(kwargs["prompt"]))
+        generated_envelopes.append(cast("MessageEnvelope", kwargs["response_envelope"]))
+        return "$response"
+
+    install_generate_response_mock(bot, AsyncMock(side_effect=generate_response))
+    gate = CoalescingGate(
+        dispatch_batch=bot._turn_controller.handle_coalesced_batch,
+        debounce_seconds=lambda: 60.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    replace_turn_controller_deps(bot, coalescing_gate=gate)
+    bot._turn_controller.deps.response_runner.has_active_response_for_target = MagicMock(return_value=True)
+    bot._turn_controller.deps.response_runner.reserve_waiting_human_message = MagicMock(return_value=None)
+
+    text_event = _prepared_text_event(
+        event_id="$typed-followup",
+        body="typed follow-up",
+    )
+    handoff_event = _prepared_text_event(
+        event_id="$voice-router-handoff",
+        body="@general could you help with this?",
+        sender="@mindroom_router:localhost",
+        source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+        content_overrides={
+            ATTACHMENT_IDS_KEY: ["voice-attachment"],
+            COALESCING_CLASS_KEY: VOICE_COALESCING_CLASS,
+            ORIGINAL_SENDER_KEY: "@user:localhost",
+            ROUTER_RELAY_PROMPT_KEY: "canonical voice transcript",
+        },
+    )
+    ordered_events = [text_event, handoff_event] if event_order == "text-first" else [handoff_event, text_event]
+
+    with (
+        patch.object(
+            bot._turn_controller.deps.resolver,
+            "coalescing_thread_id",
+            new=AsyncMock(return_value="$thread:localhost"),
+        ),
+        patch("mindroom.turn_controller.interactive.handle_text_response", new_callable=AsyncMock, return_value=None),
+        patch("mindroom.turn_controller.is_dm_room", new_callable=AsyncMock, return_value=False),
+    ):
+        for event in ordered_events:
+            await bot._turn_controller._dispatch_prepared_text_like_ingress(
+                room=room,
+                prepared_event=event,
+                dispatch_event=event,
+                requester_user_id="@user:localhost",
+                dispatch_timing=None,
+            )
+        await asyncio.sleep(0.01)
+        assert generated_prompts == []
+        await gate.drain_all()
+
+    assert len(generated_prompts) == 1
+    assert "typed follow-up" in generated_prompts[0]
+    assert "canonical voice transcript" in generated_prompts[0]
+    assert generated_envelopes[0].source_kind == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+    assert generated_envelopes[0].sender_id == "@mindroom_router:localhost"
+    assert generated_envelopes[0].requester_id == "@user:localhost"
+    assert generated_envelopes[0].attachment_ids == ("voice-attachment",)
+
+
+@pytest.mark.asyncio
 async def test_non_voice_router_handoff_keeps_trusted_relay_active_response_bypass(tmp_path: Path) -> None:
     """Non-voice trusted router relays should keep the active-follow-up bypass."""
     bot = _make_general_bot(tmp_path)

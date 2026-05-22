@@ -2485,7 +2485,6 @@ class TurnController:
         """Return a downstream pending event for one successful voice outcome."""
         item = outcome.item
         if outcome.error is not None:
-            self._mark_source_events_responded(HandledTurnState.from_source_event_id(item.event.event_id))
             return None
 
         if item.dispatch_timing is not None:
@@ -2584,6 +2583,9 @@ class TurnController:
             has_successful_voice = bool(pending_by_key)
             successful_voice_keys = tuple(pending_by_key)
             text_key = self._text_key_for_voice_ingress_batch(batch.key, successful_voice_keys)
+            if has_successful_voice:
+                self.deps.voice_coalescing_gate.alias_pending_voice_handoff(batch.key, text_key)
+                self.deps.coalescing_gate.retarget(batch.key, text_key)
             all_text_items = (
                 *batch.text_items,
                 *batch.consume_claimed_text_items(),

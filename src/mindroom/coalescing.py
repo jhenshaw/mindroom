@@ -292,12 +292,13 @@ class CoalescingGate:
         return count
 
     @staticmethod
-    def _front_normal_run_starts_with_voice(gate: _GateEntry) -> bool:
-        return bool(
-            gate.queue
-            and gate.queue[0].kind is _QueueKind.NORMAL
-            and gate.queue[0].pending_event.coalescing_class == VOICE_COALESCING_CLASS,
-        )
+    def _front_normal_run_contains_voice(gate: _GateEntry) -> bool:
+        for queued in gate.queue:
+            if queued.kind is not _QueueKind.NORMAL:
+                return False
+            if queued.pending_event.coalescing_class == VOICE_COALESCING_CLASS:
+                return True
+        return False
 
     @staticmethod
     def _extend_candidate_with_grace_media(gate: _GateEntry, candidate_count: int) -> int:
@@ -662,6 +663,9 @@ class CoalescingGate:
         gate.phase = GatePhase.IN_FLIGHT
         gate.deadline = None
         gate.grace_deadline = None
+        current_key, current_gate = self._resolve_gate_entry(key, gate)
+        if current_key is not None and current_gate is gate:
+            key = current_key
         pending_count = len(pending_events)
         timing_scope = event_timing_scope(pending_events[-1].event.event_id)
         log_context: dict[str, object] = {
@@ -766,7 +770,7 @@ class CoalescingGate:
                     )
                     continue
 
-                coalesce_normal_events = current_key[1] is not None or self._front_normal_run_starts_with_voice(gate)
+                coalesce_normal_events = current_key[1] is not None or self._front_normal_run_contains_voice(gate)
                 await self._wait_for_debounce(gate, coalesce_normal_events=coalesce_normal_events)
                 bypass_grace = self._is_shutting_down() or gate.drain_all_requested
                 use_upload_grace = not bypass_grace and self._upload_grace_seconds() > 0
