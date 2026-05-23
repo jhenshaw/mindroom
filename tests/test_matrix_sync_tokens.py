@@ -12,9 +12,11 @@ import nio
 import pytest
 
 from mindroom.bot import AgentBot
+from mindroom.coalescing_batch import PendingEvent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent
 from mindroom.matrix.sync_certification import SyncCheckpoint, SyncTrustState
 from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_token_record, save_sync_token
 from mindroom.matrix.users import AgentMatrixUser
@@ -511,12 +513,31 @@ async def test_late_ready_ingress_after_shutdown_checkpoint_clears_saved_token(t
 
     assert load_sync_token_record(tmp_path, bot.agent_name) is not None
 
-    room = MagicMock(spec=nio.MatrixRoom)
-    room.room_id = "!room:localhost"
-    event = MagicMock()
-    event.event_id = "$late"
-    pending_event = MagicMock()
-    pending_event.event = event
+    room = nio.MatrixRoom("!room:localhost", bot.agent_user.user_id)
+    closed_metadata: list[str] = []
+    pending_event = PendingEvent(
+        event=PreparedTextEvent(
+            sender="@user:localhost",
+            event_id="$late",
+            body="late ready text",
+            source={
+                "content": {"body": "late ready text", "msgtype": "m.text"},
+                "event_id": "$late",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1,
+            },
+            server_timestamp=1,
+        ),
+        room=room,
+        source_kind="message",
+        dispatch_metadata=(
+            PendingDispatchMetadata(
+                kind="test_metadata",
+                payload=None,
+                close=lambda: closed_metadata.append("$late"),
+            ),
+        ),
+    )
     ready_task = asyncio.create_task(
         asyncio.sleep(
             0,
@@ -539,6 +560,7 @@ async def test_late_ready_ingress_after_shutdown_checkpoint_clears_saved_token(t
     )
 
     bot._coalescing_gate.enqueue_sealed_batch.assert_not_called()
+    assert closed_metadata == ["$late"]
     assert load_sync_token_record(tmp_path, bot.agent_name) is None
     assert bot._sync_trust_state is SyncTrustState.UNCERTAIN
     assert bot._sync_checkpoint is None

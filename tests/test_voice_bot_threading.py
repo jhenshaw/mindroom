@@ -936,8 +936,8 @@ async def test_prepare_for_sync_shutdown_cancels_unresolved_turn_ingress_ready_t
 
 
 @pytest.mark.asyncio
-async def test_prepare_for_sync_shutdown_cancels_raw_voice_child_tasks(mock_home_bot: AgentBot) -> None:
-    """Raw voice shutdown owns the preliminary and STT tasks, not only the wrapper tasks."""
+async def test_prepare_for_sync_shutdown_cancels_raw_voice_waiter_tasks(mock_home_bot: AgentBot) -> None:
+    """Raw voice shutdown owns the preliminary and normalization waiter tasks."""
     bot = mock_home_bot
     room = _threaded_room()
     voice_event = _make_threaded_voice_event(event_id="$voice-shutdown")
