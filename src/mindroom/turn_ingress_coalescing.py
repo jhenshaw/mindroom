@@ -296,7 +296,10 @@ class TurnIngressCoalescingGate:
         predecessor_tasks = [
             group.drain_task
             for group in groups
-            if group.drain_task is not None and not group.drain_task.done() and group.drain_task is not current_task
+            if group.drain_task is not None
+            and not group.drain_task.done()
+            and group.drain_task is not current_task
+            and not self._admissions_have_pending_work(group.items)
         ]
         if not predecessor_tasks:
             return

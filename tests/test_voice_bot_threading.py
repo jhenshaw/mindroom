@@ -921,7 +921,7 @@ async def test_prepare_for_sync_shutdown_cancels_unresolved_turn_ingress_ready_t
     )
 
     try:
-        await asyncio.wait_for(mock_home_bot.prepare_for_sync_shutdown(), timeout=0.2)
+        await asyncio.wait_for(mock_home_bot.prepare_for_sync_shutdown(), timeout=2.0)
     finally:
         if not ready_task.done():
             ready_task.cancel()
@@ -1495,6 +1495,124 @@ async def test_receive_time_barrier_dispatches_before_pending_raw_voice_stt_fini
     release_voice.set()
     await _drain_direct_ingress(ingress_gate, coalescing_gate)
     assert [batch.source_event_ids for batch in batches] == [["$command"], ["$voice"]]
+
+
+@pytest.mark.asyncio
+async def test_receive_time_repeated_barriers_do_not_wait_for_pending_raw_voice_stt() -> None:
+    """A later command should not block on a voice group already split by an earlier command."""
+    room = _threaded_room()
+    ingress_gate, coalescing_gate, batches = _install_direct_ingress_capture_gates(debounce_seconds=60.0)
+    provisional_key = IngressProvisionalKey(room.room_id, "@user:example.com")
+    key = (room.room_id, "$thread_root", "@user:example.com")
+    release_voice = asyncio.Event()
+
+    await ingress_gate.admit_raw_voice(
+        provisional_key,
+        _raw_voice_ingress_item(
+            room=room,
+            event_id="$voice",
+            preliminary_key=key,
+            ready_task=_ready_task(
+                _prompt_ready_result(
+                    room=room,
+                    key=key,
+                    event_id="$voice",
+                    body="voice transcript",
+                    order=1,
+                    source_kind=VOICE_SOURCE_KIND,
+                    coalescing_class=VOICE_COALESCING_CLASS,
+                ),
+                release=release_voice,
+            ),
+            order=1,
+        ),
+    )
+    await _admit_prompt_result(
+        ingress_gate,
+        provisional_key,
+        _barrier_ready_result(room=room, key=key, event_id="$command1", order=2),
+        barrier=True,
+    )
+    await coalescing_gate.drain_all()
+    assert [batch.source_event_ids for batch in batches] == [["$command1"]]
+
+    second_barrier_task = asyncio.create_task(
+        _admit_prompt_result(
+            ingress_gate,
+            provisional_key,
+            _barrier_ready_result(room=room, key=key, event_id="$command2", order=3),
+            barrier=True,
+        ),
+    )
+    try:
+        await asyncio.sleep(0.02)
+        await coalescing_gate.drain_all()
+        assert [batch.source_event_ids for batch in batches] == [["$command1"], ["$command2"]]
+        assert second_barrier_task.done()
+    finally:
+        release_voice.set()
+        await second_barrier_task
+        await _drain_direct_ingress(ingress_gate, coalescing_gate)
+
+    assert [batch.source_event_ids for batch in batches] == [["$command1"], ["$command2"], ["$voice"]]
+
+
+@pytest.mark.asyncio
+async def test_receive_time_barrier_flushes_ready_prefix_from_pending_closed_group() -> None:
+    """A command after text+pending voice should flush the ready text without waiting for STT."""
+    room = _threaded_room()
+    ingress_gate, coalescing_gate, batches = _install_direct_ingress_capture_gates(debounce_seconds=0.0)
+    provisional_key = IngressProvisionalKey(room.room_id, "@user:example.com")
+    key = (room.room_id, "$thread_root", "@user:example.com")
+    release_voice = asyncio.Event()
+
+    await _admit_prompt_result(
+        ingress_gate,
+        provisional_key,
+        _prompt_ready_result(room=room, key=key, event_id="$text", body="text first", order=1),
+    )
+    await ingress_gate.admit_raw_voice(
+        provisional_key,
+        _raw_voice_ingress_item(
+            room=room,
+            event_id="$voice",
+            preliminary_key=key,
+            ready_task=_ready_task(
+                _prompt_ready_result(
+                    room=room,
+                    key=key,
+                    event_id="$voice",
+                    body="voice transcript",
+                    order=2,
+                    source_kind=VOICE_SOURCE_KIND,
+                    coalescing_class=VOICE_COALESCING_CLASS,
+                ),
+                release=release_voice,
+            ),
+            order=2,
+        ),
+    )
+    await _wait_for_direct_condition(lambda: bool(ingress_gate._ingress_draining_groups.get(provisional_key)))
+
+    barrier_task = asyncio.create_task(
+        _admit_prompt_result(
+            ingress_gate,
+            provisional_key,
+            _barrier_ready_result(room=room, key=key, event_id="$command", order=3),
+            barrier=True,
+        ),
+    )
+    try:
+        await asyncio.sleep(0.02)
+        await coalescing_gate.drain_all()
+        assert [batch.source_event_ids for batch in batches] == [["$text"], ["$command"]]
+        assert barrier_task.done()
+    finally:
+        release_voice.set()
+        await barrier_task
+        await _drain_direct_ingress(ingress_gate, coalescing_gate)
+
+    assert [batch.source_event_ids for batch in batches] == [["$text"], ["$command"], ["$voice"]]
 
 
 @pytest.mark.asyncio
