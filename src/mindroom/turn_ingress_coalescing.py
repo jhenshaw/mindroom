@@ -169,7 +169,7 @@ class TurnIngressCoalescingGate:
             coalescing_class=coalescing_class,
         )
         if barrier:
-            if await self._dispatch_barrier_after_latest_accepting_group(provisional_key, admission):
+            if await self._dispatch_barrier_after_accepting_groups(provisional_key, admission):
                 return
             await self._wait_for_barrier_predecessor_groups(self._groups_for_provisional_key(provisional_key))
             await self._forward_independent_ready_admission(admission)
@@ -303,7 +303,7 @@ class TurnIngressCoalescingGate:
         self._collect_finished_ingress_drain_tasks()
         self._raise_ingress_drain_errors()
 
-    async def _dispatch_barrier_after_latest_accepting_group(
+    async def _dispatch_barrier_after_accepting_groups(
         self,
         provisional_key: IngressProvisionalKey,
         admission: _ReadyIngressAdmission,
@@ -311,16 +311,44 @@ class TurnIngressCoalescingGate:
         groups = [group for group in self._groups_for_provisional_key(provisional_key) if group.accepting_late_prompts]
         if not groups:
             return False
-        target_group = groups[-1]
-        self._seal_group_for_barrier(provisional_key, target_group)
-        ordered_items = sorted(target_group.items, key=lambda item: item.received_order)
-        ready_prefix_length = self._ready_prefix_length(ordered_items)
-        ready_prefix = ordered_items[:ready_prefix_length]
-        target_group.items = ordered_items[ready_prefix_length:]
-        if ready_prefix:
-            await self._dispatch_fixed_ingress_admissions(ready_prefix)
+
+        ready_prefixes: list[_ReadyIngressAdmission] = []
+        for group in groups:
+            self._seal_group_for_barrier(provisional_key, group)
+            ordered_items = sorted(group.items, key=lambda item: item.received_order)
+            ready_prefix_length = self._ready_prefix_length(ordered_items)
+            ready_prefixes.extend(ordered_items[:ready_prefix_length])
+            group.items = ordered_items[ready_prefix_length:]
+
+        await self._wait_for_ready_predecessor_groups(provisional_key, groups)
+        if ready_prefixes:
+            await self._dispatch_fixed_ingress_admissions(
+                sorted(ready_prefixes, key=lambda item: item.received_order),
+            )
         await self._forward_independent_ready_admission(admission)
         return True
+
+    async def _wait_for_ready_predecessor_groups(
+        self,
+        provisional_key: IngressProvisionalKey,
+        groups: list[_IngressPromptGroup],
+    ) -> None:
+        predecessor_tasks = {task for group in groups for task in group.predecessor_drain_tasks if not task.done()}
+        if not predecessor_tasks:
+            return
+        current_task = asyncio.current_task()
+        tasks_to_wait = [
+            group.drain_task
+            for group in self._ingress_draining_groups.get(provisional_key, ())
+            if group.drain_task in predecessor_tasks
+            and group.drain_task is not current_task
+            and not self._admissions_have_pending_work(group.items)
+        ]
+        if not tasks_to_wait:
+            return
+        await asyncio.gather(*tasks_to_wait, return_exceptions=True)
+        self._collect_finished_ingress_drain_tasks()
+        self._raise_ingress_drain_errors()
 
     def _append_to_latest_claimed_voice_group(
         self,
@@ -640,6 +668,7 @@ class TurnIngressCoalescingGate:
                 return
             if self._is_shutting_down() or group.drain_all_requested or group.force_dispatch:
                 return
+            group.deadline = time.monotonic() + grace_seconds
 
     async def _wait_for_predecessor_drain_tasks(self, group: _IngressPromptGroup) -> None:
         predecessor_tasks = tuple(task for task in group.predecessor_drain_tasks if not task.done())

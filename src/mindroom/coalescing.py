@@ -21,6 +21,7 @@ from .coalescing_batch import (
 from .commands.parsing import command_parser
 from .dispatch_handoff import QUEUED_NOTICE_METADATA_KIND, DispatchEvent, PreparedTextEvent, is_media_dispatch_event
 from .dispatch_source import (
+    ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
     HOOK_DISPATCH_SOURCE_KIND,
     HOOK_SOURCE_KIND,
     IMAGE_SOURCE_KIND,
@@ -400,6 +401,39 @@ class CoalescingGate:
     @staticmethod
     def _normal_events_should_coalesce(key: CoalescingKey, gate: _GateEntry) -> bool:
         return key[1] is not None or CoalescingGate._front_normal_run_contains_voice(gate)
+
+    @staticmethod
+    def _pending_event_allows_room_scope_batch(pending_event: PendingEvent) -> bool:
+        return (
+            pending_event.coalescing_class == VOICE_COALESCING_CLASS
+            or pending_event.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+            or is_media_dispatch_event(pending_event.event)
+        )
+
+    @classmethod
+    def _sealed_batch_should_dispatch_together(
+        cls,
+        key: CoalescingKey,
+        pending_events: list[PendingEvent],
+    ) -> bool:
+        return (
+            len(pending_events) <= 1
+            or key[1] is not None
+            or any(cls._pending_event_allows_room_scope_batch(pending_event) for pending_event in pending_events)
+        )
+
+    @classmethod
+    def _claim_front_sealed_events(cls, key: CoalescingKey, gate: _GateEntry) -> list[PendingEvent]:
+        front = gate.queue[0]
+        if not isinstance(front, _QueuedSealedBatch):
+            msg = "front queue item is not a sealed batch"
+            raise TypeError(msg)
+        if cls._sealed_batch_should_dispatch_together(key, front.pending_events):
+            return cls._claim_front_events(gate, 1)
+        pending_event = front.pending_events.pop(0)
+        if not front.pending_events:
+            gate.queue.popleft()
+        return [pending_event]
 
     @staticmethod
     def _extend_candidate_with_grace_media(gate: _GateEntry, candidate_count: int) -> int:
@@ -860,7 +894,7 @@ class CoalescingGate:
                 front = gate.queue[0]
                 front_kind = _queued_work_front_kind(front)
                 if front_kind is _QueueKind.SEALED:
-                    pending_events = self._claim_front_events(gate, 1)
+                    pending_events = self._claim_front_sealed_events(current_key, gate)
                     if not gate.queue:
                         gate.drain_all_requested = False
                     await self._dispatch_claimed_events(

@@ -1247,6 +1247,124 @@ async def test_known_barrier_waits_for_older_prompt_group_to_enqueue() -> None:
 
 
 @pytest.mark.asyncio
+async def test_known_barrier_flushes_ready_open_group_before_older_unresolved_group() -> None:
+    """Barrier ordering is based on receive order, not internal group container order."""
+    room = _threaded_room()
+    dispatched: list[list[str]] = []
+    debounce_seconds = 0.0
+    downstream_gate = MagicMock()
+
+    async def enqueue_sealed_batch(_key: tuple[str, str | None, str], pending_events: list[PendingEvent]) -> None:
+        dispatched.append([pending_event.event.event_id for pending_event in pending_events])
+
+    async def enqueue(_key: tuple[str, str | None, str], pending_event: PendingEvent) -> None:
+        dispatched.append([pending_event.event.event_id])
+
+    downstream_gate.enqueue_sealed_batch = AsyncMock(side_effect=enqueue_sealed_batch)
+    downstream_gate.enqueue = AsyncMock(side_effect=enqueue)
+    ingress_gate = TurnIngressCoalescingGate(
+        debounce_seconds=lambda: debounce_seconds,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+        coalescing_gate=downstream_gate,
+    )
+    provisional_key = IngressProvisionalKey(room.room_id, "@user:example.com")
+    key = (room.room_id, "$thread", "@user:example.com")
+    release_slow_text = asyncio.Event()
+
+    await _admit_prompt_result(
+        ingress_gate,
+        provisional_key,
+        _prompt_ready_result(room=room, key=key, event_id="$slow", body="slow text", order=1),
+        release=release_slow_text,
+    )
+    await _wait_for_direct_condition(lambda: bool(ingress_gate._ingress_draining_groups.get(provisional_key)))
+
+    debounce_seconds = 60.0
+    await _admit_prompt_result(
+        ingress_gate,
+        provisional_key,
+        _prompt_ready_result(room=room, key=key, event_id="$ready", body="ready text", order=2),
+    )
+    await _admit_prompt_result(
+        ingress_gate,
+        provisional_key,
+        _barrier_ready_result(room=room, key=key, event_id="$command", order=3),
+        barrier=True,
+    )
+
+    assert dispatched == [["$ready"], ["$command"]]
+
+    release_slow_text.set()
+    await ingress_gate.drain_all()
+    assert dispatched == [["$ready"], ["$command"], ["$slow"]]
+
+
+@pytest.mark.asyncio
+async def test_known_barrier_waits_for_ready_predecessor_group_before_open_group() -> None:
+    """A barrier must not overtake a ready predecessor group already enqueueing downstream."""
+    room = _threaded_room()
+    dispatched: list[list[str]] = []
+    debounce_seconds = 0.0
+    first_enqueue_started = asyncio.Event()
+    release_first_enqueue = asyncio.Event()
+    downstream_gate = MagicMock()
+
+    async def enqueue_sealed_batch(_key: tuple[str, str | None, str], pending_events: list[PendingEvent]) -> None:
+        event_ids = [pending_event.event.event_id for pending_event in pending_events]
+        dispatched.append(event_ids)
+        if event_ids == ["$old"]:
+            first_enqueue_started.set()
+            await release_first_enqueue.wait()
+
+    async def enqueue(_key: tuple[str, str | None, str], pending_event: PendingEvent) -> None:
+        dispatched.append([pending_event.event.event_id])
+
+    downstream_gate.enqueue_sealed_batch = AsyncMock(side_effect=enqueue_sealed_batch)
+    downstream_gate.enqueue = AsyncMock(side_effect=enqueue)
+    ingress_gate = TurnIngressCoalescingGate(
+        debounce_seconds=lambda: debounce_seconds,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+        coalescing_gate=downstream_gate,
+    )
+    provisional_key = IngressProvisionalKey(room.room_id, "@user:example.com")
+    key = (room.room_id, "$thread", "@user:example.com")
+
+    await _admit_prompt_result(
+        ingress_gate,
+        provisional_key,
+        _prompt_ready_result(room=room, key=key, event_id="$old", body="old text", order=1),
+    )
+    await asyncio.wait_for(first_enqueue_started.wait(), timeout=1.0)
+
+    debounce_seconds = 60.0
+    await _admit_prompt_result(
+        ingress_gate,
+        provisional_key,
+        _prompt_ready_result(room=room, key=key, event_id="$ready", body="ready text", order=2),
+    )
+    barrier_task = asyncio.create_task(
+        _admit_prompt_result(
+            ingress_gate,
+            provisional_key,
+            _barrier_ready_result(room=room, key=key, event_id="$command", order=3),
+            barrier=True,
+        ),
+    )
+    await asyncio.sleep(0.02)
+
+    assert dispatched == [["$old"]]
+    assert not barrier_task.done()
+
+    release_first_enqueue.set()
+    await asyncio.wait_for(barrier_task, timeout=1.0)
+    await ingress_gate.drain_all()
+
+    assert dispatched == [["$old"], ["$ready"], ["$command"]]
+
+
+@pytest.mark.asyncio
 async def test_receive_time_coordinator_partitions_same_room_requester_by_preliminary_thread() -> None:
     """A voice in one preliminary thread must not retarget text from another preliminary thread."""
     room = _threaded_room()
@@ -1575,6 +1693,29 @@ async def test_receive_time_room_scope_raw_voice_and_text_coalesce_on_room_key()
 
 
 @pytest.mark.asyncio
+async def test_receive_time_room_scope_text_roots_remain_separate() -> None:
+    """The ingress layer must preserve the downstream split for independent room-level text."""
+    room = _threaded_room()
+    ingress_gate, coalescing_gate, batches = _install_direct_ingress_capture_gates(debounce_seconds=0.0)
+    provisional_key = IngressProvisionalKey(room.room_id, "@user:example.com")
+    room_key = (room.room_id, None, "@user:example.com")
+
+    await _admit_prompt_result(
+        ingress_gate,
+        provisional_key,
+        _prompt_ready_result(room=room, key=room_key, event_id="$first", body="first", order=1),
+    )
+    await _admit_prompt_result(
+        ingress_gate,
+        provisional_key,
+        _prompt_ready_result(room=room, key=room_key, event_id="$second", body="second", order=2),
+    )
+    await _drain_direct_ingress(ingress_gate, coalescing_gate)
+
+    assert [batch.source_event_ids for batch in batches] == [["$first"], ["$second"]]
+
+
+@pytest.mark.asyncio
 async def test_receive_time_voice_group_is_not_delayed_by_upload_grace() -> None:
     """Voice-bearing ingress groups should dispatch after debounce without upload-grace hold."""
     room = _threaded_room()
@@ -1721,6 +1862,54 @@ async def test_receive_time_text_first_multiple_images_during_upload_grace_dispa
     await asyncio.sleep(0.04)
     assert batches == []
 
+    await _admit_prompt_result(
+        ingress_gate,
+        provisional_key,
+        _prompt_ready_result(
+            room=room,
+            key=key,
+            event_id="$image2",
+            body="second image upload",
+            order=3,
+            source_kind=IMAGE_SOURCE_KIND,
+        ),
+    )
+    await _drain_direct_ingress(ingress_gate, coalescing_gate)
+
+    assert [batch.source_event_ids for batch in batches] == [["$text", "$image1", "$image2"]]
+
+
+@pytest.mark.asyncio
+async def test_receive_time_late_media_rearms_upload_grace() -> None:
+    """Each late media upload extends the grace window for another upload in the same turn."""
+    room = _threaded_room()
+    ingress_gate, coalescing_gate, batches = _install_direct_ingress_capture_gates(
+        debounce_seconds=0.01,
+        upload_grace_seconds=0.05,
+    )
+    provisional_key = IngressProvisionalKey(room.room_id, "@user:example.com")
+    key = (room.room_id, "$thread_root", "@user:example.com")
+
+    await _admit_prompt_result(
+        ingress_gate,
+        provisional_key,
+        _prompt_ready_result(room=room, key=key, event_id="$text", body="text first", order=1),
+    )
+    await _wait_for_direct_condition(lambda: provisional_key in ingress_gate._ingress_grace_groups)
+    await asyncio.sleep(0.02)
+    await _admit_prompt_result(
+        ingress_gate,
+        provisional_key,
+        _prompt_ready_result(
+            room=room,
+            key=key,
+            event_id="$image1",
+            body="first image upload",
+            order=2,
+            source_kind=IMAGE_SOURCE_KIND,
+        ),
+    )
+    await asyncio.sleep(0.04)
     await _admit_prompt_result(
         ingress_gate,
         provisional_key,

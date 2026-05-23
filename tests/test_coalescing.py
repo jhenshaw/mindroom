@@ -109,6 +109,47 @@ async def test_room_level_messages_do_not_coalesce() -> None:
 
 
 @pytest.mark.asyncio
+async def test_sealed_room_level_text_messages_keep_split_policy() -> None:
+    """Sealed receive-time groups must not merge independent room-level text roots."""
+    batches: list[CoalescedBatch] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 1.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    room = nio.MatrixRoom("!room:localhost", "@mindroom:localhost")
+    key = ("!room:localhost", None, "@user:localhost")
+
+    await gate.enqueue_sealed_batch(
+        key,
+        [
+            PendingEvent(
+                event=_text_event("$first:localhost", "first", 1_000_000),
+                room=room,
+                source_kind="message",
+            ),
+            PendingEvent(
+                event=_text_event("$second:localhost", "second", 1_000_600),
+                room=room,
+                source_kind="message",
+            ),
+        ],
+    )
+
+    await gate.drain_all()
+
+    assert [batch.source_event_ids for batch in batches] == [
+        ["$first:localhost"],
+        ["$second:localhost"],
+    ]
+
+
+@pytest.mark.asyncio
 async def test_room_level_messages_do_not_coalesce_during_upload_grace() -> None:
     """Room-level text roots must stay separate even when upload grace is enabled."""
     batches: list[CoalescedBatch] = []
