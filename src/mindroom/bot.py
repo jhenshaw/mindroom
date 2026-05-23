@@ -1417,6 +1417,7 @@ class AgentBot:
         """Cancel work that must not outlive the Matrix sync loop."""
         self._sync_shutting_down = True
         await self._cancel_startup_thread_prewarm()
+        self._turn_ingress_gate.cancel_unresolved_admissions()
         await self._turn_ingress_gate.drain_all()
         await self._coalescing_gate.drain_all()
         if self._sync_trust_state is SyncTrustState.CERTIFIED:

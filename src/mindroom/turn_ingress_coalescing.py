@@ -529,6 +529,52 @@ class TurnIngressCoalescingGate:
         msg = "Turn ingress drain tasks failed"
         raise BaseExceptionGroup(msg, errors)
 
+    def _all_ingress_prompt_groups(self) -> tuple[_IngressPromptGroup, ...]:
+        groups = [
+            *self._ingress_open_groups.values(),
+            *self._ingress_grace_groups.values(),
+            *(group for group_list in self._ingress_draining_groups.values() for group in group_list),
+            *(group for group_list in self._ingress_claimed_voice_groups.values() for group in group_list),
+        ]
+        unique_groups: list[_IngressPromptGroup] = []
+        seen_ids: set[int] = set()
+        for group in groups:
+            if id(group) in seen_ids:
+                continue
+            seen_ids.add(id(group))
+            unique_groups.append(group)
+        return tuple(unique_groups)
+
+    def cancel_unresolved_admissions(self) -> None:
+        """Cancel unresolved ingress admission work so shutdown can drain boundedly."""
+        for group in self._all_ingress_prompt_groups():
+            for admission in group.items:
+                self._close_ready_metadata_when_cancelling_preliminary(admission)
+                if admission.preliminary_key_task is not None and not admission.preliminary_key_task.done():
+                    admission.preliminary_key_task.cancel()
+                if not admission.ready_task.done():
+                    admission.ready_task.cancel()
+            self._wake_ingress_group(group)
+
+    def _close_ready_metadata_when_cancelling_preliminary(self, admission: _ReadyIngressAdmission) -> None:
+        if (
+            admission.preliminary_key_task is None
+            or admission.preliminary_key_task.done()
+            or not admission.ready_task.done()
+        ):
+            return
+        try:
+            result = admission.ready_task.result()
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except self.ReadyTaskError as error:
+            close_pending_event_metadata([error.pending_event])
+            return
+        except BaseException:
+            return
+        if isinstance(result, (PromptReadyIngressResult, BarrierReadyIngressResult)):
+            close_pending_event_metadata([result.pending_event])
+
     @staticmethod
     def _wake_ingress_group(group: _IngressPromptGroup) -> None:
         group.wake_generation += 1
@@ -664,7 +710,13 @@ class TurnIngressCoalescingGate:
 
     async def _wait_for_ingress_upload_grace(self, group: _IngressPromptGroup) -> None:
         grace_seconds = max(self._upload_grace_seconds(), 0.0)
-        if grace_seconds <= 0 or self._is_shutting_down() or group.drain_all_requested or group.force_dispatch:
+        if (
+            grace_seconds <= 0
+            or self._is_shutting_down()
+            or group.drain_all_requested
+            or group.force_dispatch
+            or self._group_has_completed_split(group)
+        ):
             return
         hard_deadline = time.monotonic() + upload_grace_hard_cap_seconds(grace_seconds)
         group.deadline = min(time.monotonic() + grace_seconds, hard_deadline)
@@ -672,7 +724,12 @@ class TurnIngressCoalescingGate:
             deadline = group.deadline or time.monotonic()
             if not await self._wait_for_ingress_deadline(group, deadline):
                 return
-            if self._is_shutting_down() or group.drain_all_requested or group.force_dispatch:
+            if (
+                self._is_shutting_down()
+                or group.drain_all_requested
+                or group.force_dispatch
+                or self._group_has_completed_split(group)
+            ):
                 return
             remaining_seconds = max(hard_deadline - time.monotonic(), 0.0)
             if remaining_seconds <= 0:

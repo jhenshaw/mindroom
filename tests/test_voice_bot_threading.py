@@ -396,9 +396,16 @@ def _barrier_ready_result(
     key: tuple[str, str | None, str],
     event_id: str,
     order: int,
+    source_kind: str = MESSAGE_SOURCE_KIND,
 ) -> BarrierReadyIngressResult:
     return BarrierReadyIngressResult(
-        pending_event=_ingress_pending_event(room=room, key=key, event_id=event_id, body="!help"),
+        pending_event=_ingress_pending_event(
+            room=room,
+            key=key,
+            event_id=event_id,
+            body="!help",
+            source_kind=source_kind,
+        ),
         key=key,
         received_order=order,
         received_wall_time=float(order),
@@ -885,6 +892,43 @@ async def test_voice_normalization_error_does_not_mark_audio_source_handled(mock
         await bot._turn_controller.deps.turn_ingress_gate.drain_all()
 
     assert not bot._turn_store.is_handled("$voice-error")
+
+
+@pytest.mark.asyncio
+async def test_prepare_for_sync_shutdown_cancels_unresolved_turn_ingress_ready_task(mock_home_bot: AgentBot) -> None:
+    """Sync shutdown should not block forever on unresolved receive-time normalization."""
+    room = _threaded_room()
+    ingress_gate = mock_home_bot._turn_ingress_gate
+    provisional_key = IngressProvisionalKey(room.room_id, "@user:example.com")
+    key = (room.room_id, "$thread_root", "@user:example.com")
+    release_ready_task = asyncio.Event()
+    ready_task = _ready_task(
+        _prompt_ready_result(room=room, key=key, event_id="$text", body="pending text", order=1),
+        release=release_ready_task,
+    )
+
+    await ingress_gate.admit_ready_task(
+        provisional_key,
+        ready_task=ready_task,
+        source_kind=MESSAGE_SOURCE_KIND,
+        barrier=False,
+    )
+    await _wait_for_direct_condition(
+        lambda: (
+            provisional_key in ingress_gate._ingress_open_groups
+            or any(not task.done() for task in ingress_gate._ingress_drain_tasks)
+        ),
+    )
+
+    try:
+        await asyncio.wait_for(mock_home_bot.prepare_for_sync_shutdown(), timeout=0.2)
+    finally:
+        if not ready_task.done():
+            ready_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await ready_task
+
+    assert ready_task.cancelled()
 
 
 @pytest.mark.asyncio
@@ -1963,6 +2007,45 @@ async def test_receive_time_slow_text_still_waits_for_late_media_upload_grace() 
     await _drain_direct_ingress(ingress_gate, coalescing_gate)
 
     assert [batch.source_event_ids for batch in batches] == [["$text", "$image"]]
+
+
+@pytest.mark.asyncio
+async def test_receive_time_upload_grace_exits_when_late_media_resolves_to_barrier() -> None:
+    """A command-like late upload should split the current prompt immediately."""
+    room = _threaded_room()
+    downstream_gate = MagicMock()
+    dispatched: list[list[str]] = []
+
+    async def enqueue_sealed_batch(_key: tuple[str, str | None, str], pending_events: list[PendingEvent]) -> None:
+        dispatched.append([pending_event.event.event_id for pending_event in pending_events])
+
+    async def enqueue(_key: tuple[str, str | None, str], pending_event: PendingEvent) -> None:
+        dispatched.append([pending_event.event.event_id])
+
+    downstream_gate.enqueue_sealed_batch = AsyncMock(side_effect=enqueue_sealed_batch)
+    downstream_gate.enqueue = AsyncMock(side_effect=enqueue)
+    ingress_gate = TurnIngressCoalescingGate(
+        debounce_seconds=lambda: 0.01,
+        upload_grace_seconds=lambda: 60.0,
+        is_shutting_down=lambda: False,
+        coalescing_gate=downstream_gate,
+    )
+    provisional_key = IngressProvisionalKey(room.room_id, "@user:example.com")
+    key = (room.room_id, "$thread_root", "@user:example.com")
+
+    await _admit_prompt_result(
+        ingress_gate,
+        provisional_key,
+        _prompt_ready_result(room=room, key=key, event_id="$text", body="text first", order=1),
+    )
+    await _wait_for_direct_condition(lambda: provisional_key in ingress_gate._ingress_grace_groups)
+    await _admit_prompt_result(
+        ingress_gate,
+        provisional_key,
+        _barrier_ready_result(room=room, key=key, event_id="$command", order=2, source_kind=IMAGE_SOURCE_KIND),
+    )
+
+    await _wait_for_direct_condition(lambda: dispatched == [["$text"], ["$command"]], deadline_seconds=0.2)
 
 
 @pytest.mark.asyncio
