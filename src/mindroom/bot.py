@@ -1428,12 +1428,16 @@ class AgentBot:
         """Cancel work that must not outlive the Matrix sync loop."""
         self._sync_shutting_down = True
         await self._cancel_startup_thread_prewarm()
+        cancelled_generation_before = self._turn_ingress_gate.cancelled_unresolved_admission_generation
         dropped_unresolved_ingress = self._turn_ingress_gate.cancel_unresolved_admissions()
         try:
             await self._turn_ingress_gate.drain_all()
             await self._coalescing_gate.drain_all()
         finally:
-            if self._turn_ingress_gate.cancelled_unresolved_admissions and not dropped_unresolved_ingress:
+            if (
+                self._turn_ingress_gate.cancelled_unresolved_admission_generation != cancelled_generation_before
+                and not dropped_unresolved_ingress
+            ):
                 dropped_unresolved_ingress = True
         if not dropped_unresolved_ingress and self._sync_trust_state is SyncTrustState.CERTIFIED:
             self._save_sync_checkpoint(self._sync_checkpoint)

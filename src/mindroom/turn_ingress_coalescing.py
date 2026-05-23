@@ -156,7 +156,7 @@ class TurnIngressCoalescingGate:
         self._ingress_claimed_voice_groups: dict[IngressProvisionalKey, list[_IngressPromptGroup]] = {}
         self._ingress_drain_tasks: set[asyncio.Task[None]] = set()
         self._ingress_drain_errors: list[BaseException] = []
-        self._cancelled_unresolved_admissions = False
+        self._cancelled_unresolved_admission_generation = 0
 
     def claim_received_metadata(self) -> tuple[int, float]:
         """Reserve the coordinator-owned receive order and wall-clock timestamp."""
@@ -709,22 +709,27 @@ class TurnIngressCoalescingGate:
         return cancelled_unresolved
 
     @property
-    def cancelled_unresolved_admissions(self) -> bool:
-        """Return whether shutdown has cancelled any unresolved admission."""
-        return self._cancelled_unresolved_admissions
+    def cancelled_unresolved_admission_generation(self) -> int:
+        """Return the monotonic generation for unresolved admission cancellation."""
+        return self._cancelled_unresolved_admission_generation
 
     async def _cancel_late_shutdown_admission(self, admission: _ReadyIngressAdmission) -> None:
         self._mark_unresolved_admission_cancelled()
         close_pending_event_metadata(self._completed_admission_pending_events(admission))
-        cancelled_tasks = self._cancel_unresolved_admission(admission)
+        cancelled_tasks = self._cancel_unresolved_admission(admission, mark_cancelled=False)
         await asyncio.gather(*cancelled_tasks, return_exceptions=True)
 
     def _mark_unresolved_admission_cancelled(self) -> None:
-        self._cancelled_unresolved_admissions = True
+        self._cancelled_unresolved_admission_generation += 1
         if self._on_unresolved_admission_cancelled is not None:
             self._on_unresolved_admission_cancelled()
 
-    def _cancel_unresolved_admission(self, admission: _ReadyIngressAdmission) -> tuple[asyncio.Task[Any], ...]:
+    def _cancel_unresolved_admission(
+        self,
+        admission: _ReadyIngressAdmission,
+        *,
+        mark_cancelled: bool = True,
+    ) -> tuple[asyncio.Task[Any], ...]:
         self._close_ready_metadata_when_cancelling_preliminary(admission)
         cancelled_tasks: list[asyncio.Task[Any]] = []
         if admission.preliminary_key_task is not None and not admission.preliminary_key_task.done():
@@ -737,7 +742,7 @@ class TurnIngressCoalescingGate:
             if not task.done():
                 task.cancel()
                 cancelled_tasks.append(task)
-        if cancelled_tasks:
+        if cancelled_tasks and mark_cancelled:
             self._mark_unresolved_admission_cancelled()
         return tuple(cancelled_tasks)
 

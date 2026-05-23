@@ -544,6 +544,47 @@ async def test_late_ready_ingress_after_shutdown_checkpoint_clears_saved_token(t
 
 
 @pytest.mark.asyncio
+async def test_clean_shutdown_after_poisoned_shutdown_can_save_new_checkpoint(tmp_path: Path) -> None:
+    """A prior poisoned shutdown must not suppress later certified checkpoint persistence."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.client.next_batch = "s_poisoned"
+    bot._sync_trust_state = SyncTrustState.CERTIFIED
+    bot._sync_checkpoint = SyncCheckpoint("s_poisoned")
+    release_ready_task = asyncio.Event()
+
+    async def unresolved_ready_result() -> None:
+        await release_ready_task.wait()
+
+    ready_task = asyncio.create_task(unresolved_ready_result())
+    await bot._turn_ingress_gate.admit_ready_task(
+        IngressProvisionalKey("!room:localhost", "@user:localhost"),
+        ready_task=ready_task,
+        source_kind="message",
+        barrier=False,
+    )
+
+    try:
+        await bot.prepare_for_sync_shutdown()
+    finally:
+        release_ready_task.set()
+        await asyncio.gather(ready_task, return_exceptions=True)
+
+    assert load_sync_token_record(tmp_path, bot.agent_name) is None
+
+    bot.mark_sync_loop_started()
+    bot.client.next_batch = "s_clean"
+    bot._sync_trust_state = SyncTrustState.CERTIFIED
+    bot._sync_checkpoint = SyncCheckpoint("s_clean")
+
+    await bot.prepare_for_sync_shutdown()
+
+    token_record = load_sync_token_record(tmp_path, bot.agent_name)
+    assert token_record is not None
+    assert token_record.checkpoint == SyncCheckpoint("s_clean")
+
+
+@pytest.mark.asyncio
 async def test_prepare_for_sync_shutdown_skips_precallback_uncertified_token(tmp_path: Path) -> None:
     """Shutdown must not flush a nio-advanced token before sync-response certification starts."""
     bot = _agent_bot(tmp_path)
