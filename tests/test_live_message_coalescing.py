@@ -1468,6 +1468,76 @@ async def test_room_scope_text_front_coalesces_following_voice() -> None:
 
 
 @pytest.mark.asyncio
+async def test_room_scope_text_then_voice_live_debounce_coalesces() -> None:
+    """Room-scope text should join voice that arrives during the live debounce wait."""
+    room = _make_room()
+    text = _text_event(event_id="$text", body="typed follow-up", server_timestamp=1000)
+    voice = _text_event(event_id="$voice", body="voice transcript", server_timestamp=1001)
+    calls: list[list[str]] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        calls.append(list(batch.source_event_ids))
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.05,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    key = ("!room:localhost", None, "@user:localhost")
+
+    await gate.enqueue(key, PendingEvent(event=text, room=room, source_kind="message"))
+    await asyncio.sleep(0.01)
+    await gate.enqueue(
+        key,
+        PendingEvent(
+            event=voice,
+            room=room,
+            source_kind=VOICE_SOURCE_KIND,
+            coalescing_class=VOICE_COALESCING_CLASS,
+        ),
+    )
+    await gate.drain_all()
+
+    assert calls == [["$text", "$voice"]]
+    assert _coalescing_gate_is_idle(gate)
+
+
+@pytest.mark.asyncio
+async def test_room_scope_pending_voice_handoff_waits_past_following_normal_text() -> None:
+    """A later normal text item should not unblock dispatch while raw voice may still hand off."""
+    room = _make_room()
+    first_text = _text_event(event_id="$text-1", body="first typed follow-up", server_timestamp=1000)
+    second_text = _text_event(event_id="$text-2", body="second typed follow-up", server_timestamp=1001)
+    pending_voice = True
+    calls: list[list[str]] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        calls.append(list(batch.source_event_ids))
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+        has_pending_voice_handoff=lambda _key: pending_voice,
+    )
+    key = ("!room:localhost", None, "@user:localhost")
+
+    await gate.enqueue(key, PendingEvent(event=first_text, room=room, source_kind="message"))
+    await gate.enqueue(key, PendingEvent(event=second_text, room=room, source_kind="message"))
+    await asyncio.sleep(0.06)
+
+    assert calls == []
+
+    pending_voice = False
+    await gate.drain_all()
+
+    assert calls == [["$text-1"], ["$text-2"]]
+    assert _coalescing_gate_is_idle(gate)
+
+
+@pytest.mark.asyncio
 async def test_room_scope_voice_front_coalesces_multiple_voice_events() -> None:
     """Room-scope voice bursts handed to the main gate together should dispatch once."""
     room = _make_room()

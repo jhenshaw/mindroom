@@ -42,6 +42,7 @@ from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_side_effect,
     install_generate_response_mock,
+    make_visible_message,
     replace_turn_controller_deps,
     runtime_paths_for,
     test_runtime_paths,
@@ -107,6 +108,7 @@ def _prepared_text_event(
     sender: str = "@user:localhost",
     source_kind: str | None = None,
     content_overrides: dict[str, object] | None = None,
+    server_timestamp: int = 1000000,
 ) -> PreparedTextEvent:
     content: dict[str, object] = {"body": body, "msgtype": "m.text"}
     if source_kind is not None:
@@ -121,11 +123,11 @@ def _prepared_text_event(
             "content": content,
             "event_id": event_id,
             "sender": sender,
-            "origin_server_ts": 1000000,
+            "origin_server_ts": server_timestamp,
             "type": "m.room.message",
             "room_id": "!test:localhost",
         },
-        server_timestamp=1000000,
+        server_timestamp=server_timestamp,
         source_kind_override=source_kind,
     )
 
@@ -180,10 +182,10 @@ async def test_active_thread_voice_stays_normal_and_coalesces(tmp_path: Path) ->
     await gate.drain_all()
 
     assert [batch.source_event_ids for batch in batches] == [["$voice-1", "$voice-2"]]
-    assert [pending.dispatch_policy_source_kind for pending in batches[0].pending_events] == [None, None]
-    assert ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND not in {
-        pending.dispatch_policy_source_kind for pending in batches[0].pending_events
-    }
+    assert [pending.dispatch_policy_source_kind for pending in batches[0].pending_events] == [
+        ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+        ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+    ]
     assert "first transcription" in batches[0].prompt
     assert "second transcription" in batches[0].prompt
 
@@ -210,6 +212,7 @@ async def test_active_thread_voice_coalesces_while_prior_dispatch_is_in_flight(t
         is_shutting_down=lambda: False,
     )
     replace_turn_controller_deps(bot, coalescing_gate=gate)
+    bot._turn_controller.deps.response_runner.has_active_response_for_target = MagicMock(return_value=True)
     key = (room.room_id, "$thread:localhost", "@user:localhost")
     await gate.enqueue(
         key,
@@ -253,7 +256,10 @@ async def test_active_thread_voice_coalesces_while_prior_dispatch_is_in_flight(t
     await gate.drain_all()
 
     assert [batch.source_event_ids for batch in batches] == [["$prior"], ["$voice-1", "$voice-2"]]
-    assert [pending.dispatch_policy_source_kind for pending in batches[1].pending_events] == [None, None]
+    assert [pending.dispatch_policy_source_kind for pending in batches[1].pending_events] == [
+        ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+        ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+    ]
     assert "first transcription" in batches[1].prompt
     assert "second transcription" in batches[1].prompt
 
@@ -490,15 +496,19 @@ async def test_active_text_and_trusted_voice_router_handoff_coalesce_in_one_batc
     bot._turn_controller.deps.response_runner.has_active_response_for_target = MagicMock(return_value=True)
     bot._turn_controller.deps.response_runner.reserve_waiting_human_message = MagicMock(return_value=None)
 
+    text_timestamp = 2_000_000 if event_order == "voice-first" else 1_000_000
+    handoff_timestamp = 1_000_000 if event_order == "voice-first" else 2_000_000
     text_event = _prepared_text_event(
         event_id="$typed-followup",
         body="typed follow-up",
+        server_timestamp=text_timestamp,
     )
     handoff_event = _prepared_text_event(
         event_id="$voice-router-handoff",
         body="@general could you help with this?",
         sender="@mindroom_router:localhost",
         source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+        server_timestamp=handoff_timestamp,
         content_overrides={
             ATTACHMENT_IDS_KEY: ["voice-attachment"],
             COALESCING_CLASS_KEY: VOICE_COALESCING_CLASS,
@@ -566,16 +576,34 @@ async def test_mixed_text_and_trusted_voice_router_handoff_dispatches_with_relay
     replace_turn_controller_deps(bot, coalescing_gate=gate)
     bot._turn_controller.deps.response_runner.has_active_response_for_target = MagicMock(return_value=True)
     bot._turn_controller.deps.response_runner.reserve_waiting_human_message = MagicMock(return_value=None)
+    text_timestamp = 2_000_000 if event_order == "voice-first" else 1_000_000
+    handoff_timestamp = 1_000_000 if event_order == "voice-first" else 2_000_000
+    bot._conversation_resolver.fetch_thread_history = AsyncMock(
+        return_value=thread_history_result(
+            [
+                make_visible_message(
+                    sender="@user:localhost",
+                    body="typed follow-up",
+                    event_id="$typed-followup",
+                    timestamp=text_timestamp,
+                    thread_id="$thread:localhost",
+                ),
+            ],
+            is_full_history=True,
+        ),
+    )
 
     text_event = _prepared_text_event(
         event_id="$typed-followup",
         body="typed follow-up",
+        server_timestamp=text_timestamp,
     )
     handoff_event = _prepared_text_event(
         event_id="$voice-router-handoff",
         body="@general could you help with this?",
         sender="@mindroom_router:localhost",
         source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+        server_timestamp=handoff_timestamp,
         content_overrides={
             ATTACHMENT_IDS_KEY: ["voice-attachment"],
             COALESCING_CLASS_KEY: VOICE_COALESCING_CLASS,

@@ -11468,7 +11468,7 @@ class TestAgentBot:
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.event is prepared_event
         assert pending_event.source_kind == VOICE_SOURCE_KIND
-        assert pending_event.dispatch_policy_source_kind is None
+        assert pending_event.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
         assert pending_event.dispatch_metadata == ()
 
     @pytest.mark.asyncio

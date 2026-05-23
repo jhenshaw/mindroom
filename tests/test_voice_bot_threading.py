@@ -1235,7 +1235,7 @@ async def test_voice_burst_retargets_captured_text_to_single_successful_voice_ke
     typed_pending_event = next(
         pending_event for pending_event in batches[0].pending_events if pending_event.event.event_id == "$typed"
     )
-    assert typed_pending_event.dispatch_policy_source_kind is None
+    assert typed_pending_event.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
     assert typed_pending_event.dispatch_metadata == ()
     assert "typed follow-up" in batches[0].prompt
     assert "transcript after retarget" in batches[0].prompt
@@ -1313,7 +1313,7 @@ async def test_voice_burst_keeps_captured_text_on_original_key_when_voices_split
     }
     typed_batch = next(batch for batch in batches if batch.source_event_ids == ["$typed-split"])
     typed_pending_event = typed_batch.pending_events[0]
-    assert typed_pending_event.dispatch_policy_source_kind is None
+    assert typed_pending_event.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
     assert typed_pending_event.dispatch_metadata == ()
 
 
@@ -2396,14 +2396,78 @@ async def test_non_voice_trusted_relay_does_not_join_pending_voice_burst(
             room=room,
             event=relay_event,
             envelope=envelope,
+            target=target,
             coalescing_thread_id="$thread_root",
             requester_user_id="@user:example.com",
             dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+            queued_notice_reservation=None,
             trust_internal_payload_metadata=None,
         )
 
     assert not accepted
     mock_enqueue_text_if_voice_pending.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_active_text_joining_pending_voice_reserves_queued_notice(
+    mock_home_bot: AgentBot,
+) -> None:
+    """Active typed follow-ups should keep their queued notice when captured by raw voice."""
+    bot = mock_home_bot
+    room = _threaded_room()
+    typed_followup = _threaded_prepared_text_event(
+        event_id="$typed-active",
+        body="typed follow-up while voice is pending",
+    )
+    captured_text_items: list[TextIngressItem] = []
+    reservation = MagicMock()
+
+    def capture_text_item(_key: tuple[str, str | None, str], item: TextIngressItem) -> bool:
+        captured_text_items.append(item)
+        return True
+
+    with (
+        patch.object(
+            bot._turn_controller.deps.resolver,
+            "coalescing_thread_id",
+            new=AsyncMock(return_value="$thread_root"),
+        ),
+        patch.object(
+            bot._turn_controller.deps.response_runner,
+            "has_active_response_for_target",
+            return_value=True,
+        ),
+        patch.object(
+            bot._turn_controller.deps.response_runner,
+            "reserve_waiting_human_message",
+            return_value=reservation,
+        ) as reserve_waiting_human_message,
+        patch.object(
+            bot._turn_controller.deps.voice_coalescing_gate,
+            "has_pending_voice_burst",
+            return_value=True,
+        ),
+        patch.object(
+            bot._turn_controller.deps.voice_coalescing_gate,
+            "enqueue_text_if_voice_pending",
+            side_effect=capture_text_item,
+        ),
+        patch("mindroom.turn_controller.interactive.handle_text_response", new_callable=AsyncMock, return_value=None),
+    ):
+        await bot._turn_controller._dispatch_prepared_text_like_ingress(
+            room=room,
+            prepared_event=typed_followup,
+            dispatch_event=typed_followup,
+            requester_user_id="@user:example.com",
+            dispatch_timing=None,
+        )
+
+    reserve_waiting_human_message.assert_called_once()
+    assert len(captured_text_items) == 1
+    pending_event = captured_text_items[0].pending_event
+    assert pending_event.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+    assert len(pending_event.dispatch_metadata) == 1
+    assert pending_event.dispatch_metadata[0].payload is reservation
 
 
 @pytest.mark.parametrize(
@@ -2590,6 +2654,7 @@ async def test_voice_message_keeps_normal_dispatch_when_stt_thread_changes(
     assert key == (room.room_id, "$post_stt_thread", voice_event.sender)
     assert pending_event.event is normalized_event
     assert pending_event.source_kind == "voice"
+    assert pending_event.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
     assert pending_event.dispatch_metadata == ()
 
 

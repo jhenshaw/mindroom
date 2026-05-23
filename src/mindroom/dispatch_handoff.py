@@ -389,10 +389,10 @@ def _build_batch_dispatch_event(batch: CoalescedBatch) -> TextDispatchEvent:
         return batch.primary_event
     return PreparedTextEvent(
         sender=batch.dispatch_carrier_event.sender,
-        event_id=batch.dispatch_carrier_event.event_id,
+        event_id=batch.primary_event.event_id,
         body=batch.prompt,
         source=_merge_batch_source(batch),
-        server_timestamp=batch.dispatch_carrier_event.server_timestamp,
+        server_timestamp=batch.primary_event.server_timestamp,
         source_kind_override=batch.source_kind,
     )
 

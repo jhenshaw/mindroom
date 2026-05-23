@@ -301,6 +301,10 @@ class CoalescingGate:
         return False
 
     @staticmethod
+    def _normal_events_should_coalesce(key: CoalescingKey, gate: _GateEntry) -> bool:
+        return key[1] is not None or CoalescingGate._front_normal_run_contains_voice(gate)
+
+    @staticmethod
     def _extend_candidate_with_grace_media(gate: _GateEntry, candidate_count: int) -> int:
         count = candidate_count
         while count < len(gate.queue):
@@ -321,6 +325,10 @@ class CoalescingGate:
     @staticmethod
     def _has_item_after_candidate(gate: _GateEntry, candidate_count: int) -> bool:
         return candidate_count < len(gate.queue)
+
+    @staticmethod
+    def _has_barrier_after_candidate(gate: _GateEntry, candidate_count: int) -> bool:
+        return any(gate.queue[index].kind is not _QueueKind.NORMAL for index in range(candidate_count, len(gate.queue)))
 
     @staticmethod
     def _queue_kind(pending_event: PendingEvent) -> _QueueKind:
@@ -555,7 +563,7 @@ class CoalescingGate:
             else:
                 return True
 
-    async def _wait_for_debounce(self, gate: _GateEntry, *, coalesce_normal_events: bool) -> None:
+    async def _wait_for_debounce(self, key: CoalescingKey, gate: _GateEntry) -> None:
         """Wait for the normal debounce window, returning early when a barrier appears."""
         gate.phase = GatePhase.DEBOUNCE
         gate.grace_deadline = None
@@ -563,6 +571,7 @@ class CoalescingGate:
         if debounce_seconds <= 0 or self._is_shutting_down() or gate.drain_all_requested:
             gate.deadline = time.monotonic()
             return
+        coalesce_normal_events = self._normal_events_should_coalesce(key, gate)
         if self._has_barrier_after_front_normal_run(gate, coalesce_normal_events=coalesce_normal_events):
             gate.deadline = time.monotonic()
             return
@@ -574,7 +583,10 @@ class CoalescingGate:
             if (
                 self._is_shutting_down()
                 or gate.drain_all_requested
-                or self._has_barrier_after_front_normal_run(gate, coalesce_normal_events=coalesce_normal_events)
+                or self._has_barrier_after_front_normal_run(
+                    gate,
+                    coalesce_normal_events=self._normal_events_should_coalesce(key, gate),
+                )
             ):
                 return
             gate.deadline = time.monotonic() + debounce_seconds
@@ -770,8 +782,8 @@ class CoalescingGate:
                     )
                     continue
 
-                coalesce_normal_events = current_key[1] is not None or self._front_normal_run_contains_voice(gate)
-                await self._wait_for_debounce(gate, coalesce_normal_events=coalesce_normal_events)
+                await self._wait_for_debounce(current_key, gate)
+                coalesce_normal_events = self._normal_events_should_coalesce(current_key, gate)
                 bypass_grace = self._is_shutting_down() or gate.drain_all_requested
                 use_upload_grace = not bypass_grace and self._upload_grace_seconds() > 0
                 candidate_count = self._front_normal_run_length(
@@ -782,7 +794,7 @@ class CoalescingGate:
                     continue
                 if (
                     not bypass_grace
-                    and not self._has_item_after_candidate(gate, candidate_count)
+                    and not self._has_barrier_after_candidate(gate, candidate_count)
                     and self._has_pending_voice_handoff(current_key)
                     and not self._is_shutting_down()
                 ):

@@ -28,6 +28,7 @@ class VoiceIngressItem:
     requester_user_id: str
     normalization_task: asyncio.Task[VoiceNormalizationResult | None]
     dispatch_timing: DispatchPipelineTiming | None
+    dispatch_policy_source_kind: str | None = None
     received_at: float = field(default_factory=time.monotonic)
     received_wall_time: float = field(default_factory=time.time)
 
