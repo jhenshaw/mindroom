@@ -475,11 +475,16 @@ class CoalescingGate:
         return key[1] is not None or CoalescingGate._front_normal_run_contains_voice(gate)
 
     @staticmethod
-    def _pending_event_allows_room_scope_batch(pending_event: PendingEvent) -> bool:
+    def _pending_event_forces_room_scope_sealed_batch(pending_event: PendingEvent) -> bool:
         return (
             pending_event.coalescing_class == VOICE_COALESCING_CLASS
             or pending_event.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
-            or is_media_dispatch_event(pending_event.event)
+        )
+
+    @staticmethod
+    def _pending_event_is_media(pending_event: PendingEvent) -> bool:
+        return pending_event.source_kind in {IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND} or is_media_dispatch_event(
+            pending_event.event,
         )
 
     @classmethod
@@ -491,7 +496,7 @@ class CoalescingGate:
         return (
             len(pending_events) <= 1
             or key[1] is not None
-            or any(cls._pending_event_allows_room_scope_batch(pending_event) for pending_event in pending_events)
+            or any(cls._pending_event_forces_room_scope_sealed_batch(pending_event) for pending_event in pending_events)
         )
 
     @classmethod
@@ -502,10 +507,21 @@ class CoalescingGate:
             raise TypeError(msg)
         if front.dispatch_together:
             return cls._claim_front_events(gate, 1)
-        pending_event = front.pending_events.pop(0)
+        claim_count = cls._front_room_scope_sealed_segment_length(front.pending_events)
+        pending_events = front.pending_events[:claim_count]
+        del front.pending_events[:claim_count]
         if not front.pending_events:
             gate.queue.popleft()
-        return [pending_event]
+        return pending_events
+
+    @classmethod
+    def _front_room_scope_sealed_segment_length(cls, pending_events: list[PendingEvent]) -> int:
+        if not pending_events:
+            return 0
+        count = 1
+        while count < len(pending_events) and cls._pending_event_is_media(pending_events[count]):
+            count += 1
+        return count
 
     @staticmethod
     def _extend_candidate_with_grace_media(gate: _GateEntry, candidate_count: int) -> int:

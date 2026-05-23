@@ -1146,31 +1146,7 @@ class TurnIngressCoalescingGate:
         if not prompt_segment:
             return
         coalescing_gate = self._require_coalescing_gate()
-        partitions: dict[CoalescingKey, list[tuple[_ReadyIngressAdmission, PromptReadyIngressResult]]] = {}
-        for admission, result in sorted(prompt_segment, key=lambda item: item[1].received_order):
-            partitions.setdefault(result.preliminary_key, []).append((admission, result))
-
-        pending_groups: list[tuple[CoalescingKey, list[PendingEvent]]] = []
-        for partition_items in partitions.values():
-            successful_voice_keys = [result.key for admission, result in partition_items if admission.is_raw_voice]
-            partition_pending_by_key: dict[CoalescingKey, list[PendingEvent]] = {}
-            for admission, result in partition_items:
-                target_key = (
-                    result.key
-                    if admission.is_raw_voice
-                    else _target_key_for_non_voice_item(result.key, successful_voice_keys)
-                )
-                pending_event = replace(result.pending_event, enqueue_time=result.received_wall_time)
-                if not admission.is_raw_voice and target_key != result.key:
-                    close_pending_event_metadata([pending_event])
-                    pending_event = replace(
-                        pending_event,
-                        coalescing_class=VOICE_COALESCING_CLASS,
-                        dispatch_policy_source_kind=None,
-                        dispatch_metadata=(),
-                    )
-                partition_pending_by_key.setdefault(target_key, []).append(pending_event)
-            pending_groups.extend(partition_pending_by_key.items())
+        pending_groups = self._prompt_segment_pending_groups(prompt_segment)
 
         for index, (key, pending_events) in enumerate(pending_groups):
             try:
@@ -1184,6 +1160,50 @@ class TurnIngressCoalescingGate:
                     ],
                 )
                 raise
+
+    def _prompt_segment_pending_groups(
+        self,
+        prompt_segment: list[tuple[_ReadyIngressAdmission, PromptReadyIngressResult]],
+    ) -> list[tuple[CoalescingKey, list[PendingEvent]]]:
+        preliminary_partitions: dict[CoalescingKey, list[tuple[_ReadyIngressAdmission, PromptReadyIngressResult]]] = {}
+        for admission, result in prompt_segment:
+            preliminary_partitions.setdefault(result.preliminary_key, []).append((admission, result))
+        successful_voice_keys_by_preliminary = {
+            preliminary_key: [result.key for admission, result in items if admission.is_raw_voice]
+            for preliminary_key, items in preliminary_partitions.items()
+        }
+
+        pending_groups: list[tuple[CoalescingKey, list[PendingEvent]]] = []
+        current_key: CoalescingKey | None = None
+        current_events: list[PendingEvent] = []
+        for admission, result in sorted(prompt_segment, key=lambda item: item[1].received_order):
+            target_key = (
+                result.key
+                if admission.is_raw_voice
+                else _target_key_for_non_voice_item(
+                    result.key,
+                    successful_voice_keys_by_preliminary[result.preliminary_key],
+                )
+            )
+            pending_event = replace(result.pending_event, enqueue_time=result.received_wall_time)
+            if not admission.is_raw_voice and target_key != result.key:
+                close_pending_event_metadata([pending_event])
+                pending_event = replace(
+                    pending_event,
+                    coalescing_class=VOICE_COALESCING_CLASS,
+                    dispatch_policy_source_kind=None,
+                    dispatch_metadata=(),
+                )
+            if current_key is None or current_key == target_key:
+                current_key = target_key
+                current_events.append(pending_event)
+                continue
+            pending_groups.append((current_key, current_events))
+            current_key = target_key
+            current_events = [pending_event]
+        if current_key is not None:
+            pending_groups.append((current_key, current_events))
+        return pending_groups
 
     async def _dispatch_barrier_result(self, result: BarrierReadyIngressResult) -> None:
         coalescing_gate = self._require_coalescing_gate()

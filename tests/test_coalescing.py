@@ -202,6 +202,55 @@ async def test_sealed_room_level_text_split_survives_mid_dispatch_retarget() -> 
 
 
 @pytest.mark.asyncio
+async def test_sealed_room_level_text_roots_split_even_when_later_root_has_media() -> None:
+    """A late media item may join one room root, but must not merge independent room text roots."""
+    batches: list[CoalescedBatch] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 1.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    room = nio.MatrixRoom("!room:localhost", "@mindroom:localhost")
+    key = ("!room:localhost", None, "@user:localhost")
+
+    await gate.enqueue_sealed_batch(
+        key,
+        [
+            PendingEvent(
+                event=_text_event("$text1:localhost", "first", 1_000_000),
+                room=room,
+                source_kind="message",
+                enqueue_time=1.0,
+            ),
+            PendingEvent(
+                event=_text_event("$text2:localhost", "second", 1_000_600),
+                room=room,
+                source_kind="message",
+                enqueue_time=2.0,
+            ),
+            PendingEvent(
+                event=_image_event("$image:localhost", 1_001_200),
+                room=room,
+                source_kind="image",
+                enqueue_time=3.0,
+            ),
+        ],
+    )
+
+    await gate.drain_all()
+
+    assert [batch.source_event_ids for batch in batches] == [
+        ["$text1:localhost"],
+        ["$text2:localhost", "$image:localhost"],
+    ]
+
+
+@pytest.mark.asyncio
 async def test_drain_all_waits_for_retargeted_task_spawned_during_dispatch() -> None:
     """A drain-all flush must include drain tasks created by mid-dispatch retargeting."""
     batches: list[list[str]] = []

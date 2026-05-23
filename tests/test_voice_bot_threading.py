@@ -1122,6 +1122,75 @@ async def test_receive_time_coordinator_retargets_text_to_deduped_successful_voi
 
 
 @pytest.mark.asyncio
+async def test_receive_time_retarget_preserves_order_across_preliminary_partitions() -> None:
+    """Items retargeted to the same final key should keep receive order across preliminary keys."""
+    room = _threaded_room()
+    ingress_gate, coalescing_gate, batches = _install_direct_ingress_capture_gates(debounce_seconds=0.0)
+    provisional_key = IngressProvisionalKey(room.room_id, "@user:example.com")
+    preliminary_key = (room.room_id, "$preliminary", "@user:example.com")
+    final_key = (room.room_id, "$final", "@user:example.com")
+
+    await ingress_gate.admit_raw_voice(
+        provisional_key,
+        _raw_voice_ingress_item(
+            room=room,
+            event_id="$voice1",
+            preliminary_key=preliminary_key,
+            ready_task=_ready_task(
+                _prompt_ready_result(
+                    room=room,
+                    key=final_key,
+                    preliminary_key=preliminary_key,
+                    event_id="$voice1",
+                    body="voice one",
+                    order=1,
+                    source_kind=VOICE_SOURCE_KIND,
+                    coalescing_class=VOICE_COALESCING_CLASS,
+                ),
+            ),
+            order=1,
+        ),
+    )
+    await _admit_prompt_result(
+        ingress_gate,
+        provisional_key,
+        _prompt_ready_result(
+            room=room,
+            key=final_key,
+            preliminary_key=final_key,
+            event_id="$typed",
+            body="typed between voices",
+            order=2,
+        ),
+    )
+    await ingress_gate.admit_raw_voice(
+        provisional_key,
+        _raw_voice_ingress_item(
+            room=room,
+            event_id="$voice2",
+            preliminary_key=preliminary_key,
+            ready_task=_ready_task(
+                _prompt_ready_result(
+                    room=room,
+                    key=final_key,
+                    preliminary_key=preliminary_key,
+                    event_id="$voice2",
+                    body="voice two",
+                    order=3,
+                    source_kind=VOICE_SOURCE_KIND,
+                    coalescing_class=VOICE_COALESCING_CLASS,
+                ),
+            ),
+            order=3,
+        ),
+    )
+    await _drain_direct_ingress(ingress_gate, coalescing_gate)
+
+    assert [batch.source_event_ids for batch in batches] == [["$voice1", "$typed", "$voice2"]]
+    assert batches[0].coalescing_key == final_key
+
+
+@pytest.mark.asyncio
 async def test_receive_time_retarget_closes_stripped_queued_notice_metadata() -> None:
     """Retargeted non-voice items must close metadata removed from the sealed voice batch."""
     room = _threaded_room()
