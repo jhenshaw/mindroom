@@ -7206,12 +7206,12 @@ class TestAgentBot:
         bot._turn_controller._enqueue_for_dispatch.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_audio_dispatch_appends_live_event_before_special_media_handling(
+    async def test_audio_dispatch_appends_live_event_after_thread_resolution(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Audio dispatch should update live cache before special-media short-circuiting."""
+        """Audio dispatch should register voice before using the normal media cache append path."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         room = MagicMock()
@@ -7225,10 +7225,14 @@ class TestAgentBot:
 
         bot._conversation_resolver.coalescing_thread_id = AsyncMock(side_effect=record_coalescing)
         bot._turn_controller._precheck_dispatch_event = MagicMock(return_value=prechecked_event)
-        bot._turn_controller._dispatch_special_media_as_text = AsyncMock(return_value=True)
         bot._turn_controller._enqueue_for_dispatch = AsyncMock()
 
-        await bot._turn_controller._handle_media_message_inner(room, event)
+        with patch.object(
+            type(bot._turn_controller.deps.normalizer),
+            "prepare_voice_event",
+            new=AsyncMock(return_value=None),
+        ):
+            await bot._turn_controller._handle_media_message_inner(room, event)
 
         bot._conversation_cache.append_live_event.assert_awaited_once()
         bot._conversation_resolver.coalescing_thread_id.assert_awaited_once_with(room, event)

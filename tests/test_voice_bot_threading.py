@@ -26,6 +26,7 @@ from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
     MESSAGE_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+    VOICE_COALESCING_CLASS,
     VOICE_SOURCE_KIND,
 )
 from mindroom.hooks import MessageEnvelope
@@ -224,6 +225,18 @@ async def _wait_until_voice_entry_exists(
             return
         await asyncio.sleep(0)
     pytest.fail("voice entry was not live")
+
+
+async def _wait_until_claimed_voice_text_buffer_exists(
+    gate: VoiceCoalescingGate,
+    key: tuple[str, str | None, str],
+) -> None:
+    for _ in range(50):
+        buffers = gate._claimed_text_buffers.get(key)
+        if buffers is not None and any(buffer.is_open for buffer in buffers):
+            return
+        await asyncio.sleep(0.001)
+    pytest.fail("claimed voice text buffer was not live")
 
 
 def _handled_source_event_ids(handled_turn: HandledTurnState | None) -> list[str]:
@@ -1171,6 +1184,52 @@ async def test_voice_normalization_error_does_not_mark_audio_source_handled(mock
 
 
 @pytest.mark.asyncio
+async def test_voice_registers_pending_burst_before_thread_resolution_finishes(
+    mock_home_bot: AgentBot,
+) -> None:
+    """A later text event must see pending raw voice even while audio thread lookup is slow."""
+    bot = mock_home_bot
+    room = _threaded_room()
+    voice_event = _make_threaded_voice_event(event_id="$voice-slow-thread")
+    resolution_started = asyncio.Event()
+    allow_resolution = asyncio.Event()
+
+    async def slow_coalescing_thread_id(*_args: object, **_kwargs: object) -> str:
+        resolution_started.set()
+        await allow_resolution.wait()
+        return "$thread_root"
+
+    normalized_voice = _normalized_voice_result(
+        event=voice_event,
+        text="transcript after slow thread lookup",
+        thread_id="$thread_root",
+    )
+
+    with (
+        patch.object(
+            bot._turn_controller.deps.resolver,
+            "coalescing_thread_id",
+            new=AsyncMock(side_effect=slow_coalescing_thread_id),
+        ),
+        patch.object(
+            bot._turn_controller.deps.normalizer,
+            "prepare_voice_event",
+            new=AsyncMock(return_value=normalized_voice),
+        ),
+        patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()),
+        patch.object(bot._turn_controller.deps.coalescing_gate, "enqueue", new=AsyncMock()),
+        patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+    ):
+        task = asyncio.create_task(bot._turn_controller.handle_media_event(room, voice_event))
+        await asyncio.wait_for(resolution_started.wait(), timeout=0.2)
+        assert bot._turn_controller.deps.voice_coalescing_gate.has_pending_voice_burst(
+            (room.room_id, "$thread_root", voice_event.sender),
+        )
+        allow_resolution.set()
+        await asyncio.wait_for(task, timeout=0.5)
+
+
+@pytest.mark.asyncio
 async def test_voice_burst_retargets_captured_text_to_single_successful_voice_key(
     mock_home_bot: AgentBot,
 ) -> None:
@@ -1236,9 +1295,76 @@ async def test_voice_burst_retargets_captured_text_to_single_successful_voice_ke
         pending_event for pending_event in batches[0].pending_events if pending_event.event.event_id == "$typed"
     )
     assert typed_pending_event.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+    assert typed_pending_event.coalescing_class == VOICE_COALESCING_CLASS
     assert typed_pending_event.dispatch_metadata == ()
     assert "typed follow-up" in batches[0].prompt
     assert "transcript after retarget" in batches[0].prompt
+
+
+@pytest.mark.asyncio
+async def test_voice_retarget_to_active_thread_preserves_active_follow_up_policy(
+    mock_home_bot: AgentBot,
+) -> None:
+    """Active ownership should be computed against the final post-STT voice target."""
+    bot = mock_home_bot
+    room = _threaded_room()
+    voice_event = _make_threaded_voice_event(event_id="$voice-post-active", thread_id="$pre_stt_thread")
+    normalized_voice = _normalized_voice_result(
+        event=voice_event,
+        text="retargeted into active thread",
+        thread_id="$post_stt_thread",
+    )
+    pre_stt_target = bot._turn_controller.deps.resolver.build_message_target(
+        room_id=room.room_id,
+        thread_id="$pre_stt_thread",
+        reply_to_event_id=voice_event.event_id,
+        event_source=voice_event.source,
+    )
+    post_stt_target = bot._turn_controller.deps.resolver.build_message_target(
+        room_id=room.room_id,
+        thread_id="$post_stt_thread",
+        reply_to_event_id=normalized_voice.event.event_id,
+        event_source=normalized_voice.event.source,
+    )
+    lifecycle = unwrap_extracted_collaborator(bot._response_runner)._lifecycle_coordinator
+    pre_stt_signal = lifecycle._get_or_create_queued_signal(pre_stt_target)
+    post_stt_signal = lifecycle._get_or_create_queued_signal(post_stt_target)
+    enqueued_events: list[tuple[tuple[str, str | None, str], PendingEvent]] = []
+
+    async def capture_gate_enqueue(key: tuple[str, str | None, str], pending_event: PendingEvent) -> None:
+        enqueued_events.append((key, pending_event))
+
+    post_stt_signal.begin_response_turn()
+    try:
+        with (
+            patch.object(
+                bot._turn_controller.deps.resolver,
+                "coalescing_thread_id",
+                new=AsyncMock(return_value="$pre_stt_thread"),
+            ),
+            patch.object(
+                bot._turn_controller.deps.normalizer,
+                "prepare_voice_event",
+                new=AsyncMock(return_value=normalized_voice),
+            ),
+            patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()),
+            patch.object(
+                bot._turn_controller.deps.coalescing_gate,
+                "enqueue",
+                new=AsyncMock(side_effect=capture_gate_enqueue),
+            ),
+            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+        ):
+            await bot._on_media_message(room, voice_event)
+    finally:
+        post_stt_signal.finish_response_turn()
+
+    assert pre_stt_signal.pending_human_messages == 0
+    assert not pre_stt_signal.is_set()
+    assert len(enqueued_events) == 1
+    key, pending_event = enqueued_events[0]
+    assert key == (room.room_id, "$post_stt_thread", voice_event.sender)
+    assert pending_event.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
 
 
 @pytest.mark.asyncio
@@ -1365,13 +1491,6 @@ async def test_late_text_after_voice_claim_retargets_with_successful_voice_key(
             thread_id="$retargeted_thread",
         )
 
-    async def wait_for_voice_claim() -> None:
-        for _ in range(50):
-            if raw_key not in voice_gate._entries and voice_gate.has_pending_voice_burst(raw_key):
-                return
-            await asyncio.sleep(0)
-        pytest.fail("voice burst was not claimed before late text")
-
     voice_task: asyncio.Task[None] | None = None
     try:
         with (
@@ -1395,7 +1514,7 @@ async def test_late_text_after_voice_claim_retargets_with_successful_voice_key(
         ):
             voice_task = asyncio.create_task(bot._on_media_message(room, voice_event))
             await asyncio.wait_for(prepare_started.wait(), timeout=1.0)
-            await wait_for_voice_claim()
+            await asyncio.wait_for(_wait_until_claimed_voice_text_buffer_exists(voice_gate, raw_key), timeout=1.0)
 
             await bot._turn_controller._dispatch_prepared_text_like_ingress(
                 room=room,
@@ -2042,14 +2161,6 @@ async def test_retargeted_voice_waits_for_later_raw_voice_pending_under_original
             thread_id="$post_stt_thread",
         )
 
-    async def wait_for_voice_claim() -> None:
-        deadline = asyncio.get_running_loop().time() + 1.0
-        while asyncio.get_running_loop().time() < deadline:
-            if raw_key not in voice_gate._entries and voice_gate.has_pending_voice_burst(raw_key):
-                return
-            await asyncio.sleep(0.001)
-        pytest.fail("first voice burst was not claimed before second voice")
-
     async def record_dispatch(
         _room: nio.MatrixRoom,
         dispatched_event: PreparedTextEvent | nio.RoomMessageText,
@@ -2112,7 +2223,7 @@ async def test_retargeted_voice_waits_for_later_raw_voice_pending_under_original
             )
             first_task = asyncio.create_task(bot._on_media_message(room, first_voice))
             await asyncio.wait_for(started["$voice1"].wait(), timeout=1.0)
-            await wait_for_voice_claim()
+            await asyncio.wait_for(_wait_until_claimed_voice_text_buffer_exists(voice_gate, raw_key), timeout=1.0)
             second_task = asyncio.create_task(bot._on_media_message(room, second_voice))
             await asyncio.wait_for(started["$voice2"].wait(), timeout=1.0)
 

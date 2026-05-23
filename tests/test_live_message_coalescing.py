@@ -42,7 +42,12 @@ from mindroom.dispatch_handoff import (
     _build_batch_dispatch_event,
     build_dispatch_handoff,
 )
-from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND, VOICE_COALESCING_CLASS, VOICE_SOURCE_KIND
+from mindroom.dispatch_source import (
+    ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+    TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+    VOICE_COALESCING_CLASS,
+    VOICE_SOURCE_KIND,
+)
 from mindroom.handled_turns import HandledTurnState
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import (
@@ -1534,6 +1539,100 @@ async def test_room_scope_pending_voice_handoff_waits_past_following_normal_text
     await gate.drain_all()
 
     assert calls == [["$text-1"], ["$text-2"]]
+    assert _coalescing_gate_is_idle(gate)
+
+
+@pytest.mark.asyncio
+async def test_non_voice_active_follow_up_policy_bypasses_gate() -> None:
+    """Direct active text follow-ups should not wait for the normal debounce window."""
+    room = _make_room()
+    active_followup = _text_event(event_id="$active", body="stop", server_timestamp=1000)
+    dispatched = asyncio.Event()
+    calls: list[list[str]] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        calls.append(list(batch.source_event_ids))
+        dispatched.set()
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 60.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    key = ("!room:localhost", "$thread", "@user:localhost")
+
+    await gate.enqueue(
+        key,
+        PendingEvent(
+            event=active_followup,
+            room=room,
+            source_kind="message",
+            dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+        ),
+    )
+    try:
+        await asyncio.wait_for(dispatched.wait(), timeout=0.2)
+    finally:
+        await gate.drain_all()
+
+    assert calls == [["$active"]]
+    assert _coalescing_gate_is_idle(gate)
+
+
+@pytest.mark.asyncio
+async def test_active_follow_up_voice_join_grace_ignores_ordinary_text_wakes() -> None:
+    """A second active text wake should not break the tiny router-voice join grace."""
+    room = _make_room()
+    first_text = _text_event(event_id="$text-1", body="first typed follow-up", server_timestamp=1000)
+    second_text = _text_event(event_id="$text-2", body="second typed follow-up", server_timestamp=1001)
+    voice = PreparedTextEvent(
+        event_id="$voice",
+        sender="@mindroom_router:localhost",
+        body="voice transcript",
+        source={"content": {"body": "voice transcript"}},
+        source_kind_override=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+        server_timestamp=1002,
+    )
+    calls: list[list[str]] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        calls.append(list(batch.source_event_ids))
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 60.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    key = ("!room:localhost", "$thread", "@user:localhost")
+
+    for text in [first_text, second_text]:
+        await gate.enqueue(
+            key,
+            PendingEvent(
+                event=text,
+                room=room,
+                source_kind="message",
+                dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+            ),
+        )
+        await asyncio.sleep(0.01)
+
+    assert calls == []
+
+    await gate.enqueue(
+        key,
+        PendingEvent(
+            event=voice,
+            room=room,
+            source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+            coalescing_class=VOICE_COALESCING_CLASS,
+        ),
+    )
+    await gate.drain_all()
+
+    assert calls == [["$text-1", "$text-2", "$voice"]]
     assert _coalescing_gate_is_idle(gate)
 
 

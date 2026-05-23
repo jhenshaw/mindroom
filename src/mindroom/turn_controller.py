@@ -807,9 +807,23 @@ class TurnController:
             key,
             TextIngressItem(pending_event=pending_event),
         )
-        if not accepted and created_reservation:
-            close_pending_event_metadata([pending_event])
-        return accepted
+        if accepted:
+            return True
+        await self._enqueue_text_waiting_for_voice_handoff(key, pending_event)
+        return True
+
+    async def _enqueue_text_waiting_for_voice_handoff(
+        self,
+        key: CoalescingKey,
+        pending_event: PendingEvent,
+    ) -> None:
+        """Queue text that saw unresolved raw voice before a concrete voice burst existed."""
+        voice_pending_event = replace(pending_event, coalescing_class=VOICE_COALESCING_CLASS)
+        try:
+            await self.deps.coalescing_gate.enqueue(key, voice_pending_event)
+        except BaseException:
+            close_pending_event_metadata([voice_pending_event])
+            raise
 
     async def _enqueue_media_for_dispatch(
         self,
@@ -2408,6 +2422,16 @@ class TurnController:
             room_id=room.room_id,
         )
         attach_dispatch_pipeline_timing(prechecked_event.event.source, dispatch_timing)
+        if is_audio_message_event(prechecked_event.event):
+            await self._on_audio_media_message(
+                room,
+                _PrecheckedEvent(
+                    event=prechecked_event.event,
+                    requester_user_id=prechecked_event.requester_user_id,
+                ),
+            )
+            return
+
         # Prime transitive ancestor lookups before writing advisory cache membership.
         coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, prechecked_event.event)
         event_info = EventInfo.from_event(prechecked_event.event.source)
@@ -2421,7 +2445,6 @@ class TurnController:
         if await self._dispatch_special_media_as_text(
             room,
             prechecked_event,
-            coalescing_thread_id=coalescing_thread_id,
         ):
             return
         if not is_matrix_media_dispatch_event(prechecked_event.event):
@@ -2438,21 +2461,9 @@ class TurnController:
         self,
         room: nio.MatrixRoom,
         prechecked_event: _PrecheckedInboundMediaEvent,
-        *,
-        coalescing_thread_id: str | None,
     ) -> bool:
         """Handle media events that normalize into the text dispatch pipeline."""
         event = prechecked_event.event
-        if is_audio_message_event(event):
-            await self._on_audio_media_message(
-                room,
-                _PrecheckedEvent(
-                    event=event,
-                    requester_user_id=prechecked_event.requester_user_id,
-                ),
-                coalescing_thread_id=coalescing_thread_id,
-            )
-            return True
         if is_file_message_event(event):
             return await self._dispatch_file_sidecar_text_preview(
                 room,
@@ -2482,41 +2493,9 @@ class TurnController:
             self._mark_source_events_responded(HandledTurnState.from_source_event_id(event.event_id))
             return
 
-        if coalescing_thread_id is None:
-            coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, event)
-
-        target = self.deps.resolver.build_message_target(
-            room_id=room.room_id,
-            thread_id=coalescing_thread_id,
-            reply_to_event_id=event.event_id,
-            event_source=event.source,
-        )
-        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
-        envelope = MessageEnvelope(
-            source_event_id=event.event_id,
-            room_id=room.room_id,
-            target=target,
-            requester_id=prechecked_event.requester_user_id,
-            sender_id=event.sender,
-            body=event.body,
-            attachment_ids=tuple(parse_attachment_ids_from_event_source(event.source)),
-            mentioned_agents=(),
-            agent_name=self.deps.agent_name,
-            source_kind=VOICE_SOURCE_KIND,
-            origin=classify_turn_origin(
-                transport_sender_id=event.sender,
-                requester_id=prechecked_event.requester_user_id,
-                sender_entity_name=registry.current_entity_name_for_user_id(event.sender),
-                requester_entity_name=registry.current_entity_name_for_user_id(prechecked_event.requester_user_id),
-                source_kind=VOICE_SOURCE_KIND,
-                original_sender=None,
-                trusted_user_relay=False,
-            ),
-        )
-        dispatch_policy_source_kind = (
-            ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
-            if self._should_preserve_active_thread_follow_up_policy(envelope=envelope)
-            else None
+        unresolved_reservation = self.deps.voice_coalescing_gate.reserve_unresolved_voice_handoff(
+            room.room_id,
+            prechecked_event.requester_user_id,
         )
         dispatch_timing = get_dispatch_pipeline_timing(event.source)
         if dispatch_timing is not None:
@@ -2530,18 +2509,35 @@ class TurnController:
             ),
             name=f"voice_normalization:{room.room_id}:{event.event_id}",
         )
-        await self.deps.voice_coalescing_gate.enqueue_voice(
-            (room.room_id, coalescing_thread_id, prechecked_event.requester_user_id),
-            VoiceIngressItem(
-                room=room,
-                event=event,
-                requester_user_id=prechecked_event.requester_user_id,
-                normalization_task=normalization_task,
+        try:
+            if coalescing_thread_id is None:
+                coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, event)
+            event_info = EventInfo.from_event(event.source)
+            await self._append_live_event_with_timing(
+                room.room_id,
+                event,
+                event_info=event_info,
                 dispatch_timing=dispatch_timing,
-                dispatch_policy_source_kind=dispatch_policy_source_kind,
-            ),
-            flush_batch=self._flush_voice_ingress_batch,
-        )
+            )
+            voice_key = (room.room_id, coalescing_thread_id, prechecked_event.requester_user_id)
+            self.deps.coalescing_gate.mark_voice_handoff_pending(voice_key)
+            await self.deps.voice_coalescing_gate.enqueue_voice(
+                voice_key,
+                VoiceIngressItem(
+                    room=room,
+                    event=event,
+                    requester_user_id=prechecked_event.requester_user_id,
+                    normalization_task=normalization_task,
+                    dispatch_timing=dispatch_timing,
+                ),
+                flush_batch=self._flush_voice_ingress_batch,
+                unresolved_reservation=unresolved_reservation,
+            )
+        except BaseException:
+            unresolved_reservation.release()
+            if not normalization_task.done():
+                normalization_task.cancel()
+            raise
 
     async def _pending_voice_event_from_outcome(
         self,
@@ -2572,17 +2568,49 @@ class TurnController:
             requester_user_id=item.requester_user_id,
             normalized_source=normalized_voice.event.source,
         )
+        dispatch_policy_source_kind = self._voice_dispatch_policy_source_kind(
+            room=item.room,
+            event=normalized_voice.event,
+            requester_user_id=item.requester_user_id,
+            thread_id=normalized_voice.effective_thread_id,
+        )
         key, pending_event, _source_kind = await self._build_pending_event_for_dispatch(
             normalized_voice.event,
             item.room,
             source_kind=VOICE_SOURCE_KIND,
             requester_user_id=item.requester_user_id,
-            dispatch_policy_source_kind=item.dispatch_policy_source_kind,
+            dispatch_policy_source_kind=dispatch_policy_source_kind,
             coalescing_key=(item.room.room_id, normalized_voice.effective_thread_id, item.requester_user_id),
             trust_internal_payload_metadata=True,
             enqueue_time=item.received_wall_time,
         )
         return key, item.received_at, pending_event
+
+    def _voice_dispatch_policy_source_kind(
+        self,
+        *,
+        room: nio.MatrixRoom,
+        event: DispatchEvent,
+        requester_user_id: str,
+        thread_id: str | None,
+    ) -> str | None:
+        """Return target-dependent dispatch policy after voice normalization has resolved."""
+        target = self.deps.resolver.build_message_target(
+            room_id=room.room_id,
+            thread_id=thread_id,
+            reply_to_event_id=event.event_id,
+            event_source=event.source,
+        )
+        envelope = self.deps.resolver.build_ingress_envelope(
+            room_id=room.room_id,
+            event=event,
+            requester_user_id=requester_user_id,
+            target=target,
+            source_kind=VOICE_SOURCE_KIND,
+        )
+        if self._should_preserve_active_thread_follow_up_policy(envelope=envelope):
+            return ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+        return None
 
     @staticmethod
     def _text_key_for_voice_ingress_batch(
@@ -2632,13 +2660,17 @@ class TurnController:
             if has_successful_voice:
                 self.deps.voice_coalescing_gate.alias_pending_voice_handoff(batch.key, text_key)
                 self.deps.coalescing_gate.retarget(batch.key, text_key)
+                self.deps.coalescing_gate.mark_voice_handoff_pending(text_key)
             all_text_items = (
                 *batch.text_items,
                 *batch.consume_claimed_text_items(),
             )
             text_items_to_close_on_failure = all_text_items
             for text_item in all_text_items:
-                pending_by_key.setdefault(text_key, []).append((text_item.received_at, text_item.pending_event))
+                pending_event = text_item.pending_event
+                if has_successful_voice:
+                    pending_event = replace(pending_event, coalescing_class=VOICE_COALESCING_CLASS)
+                pending_by_key.setdefault(text_key, []).append((text_item.received_at, pending_event))
 
             await self._enqueue_voice_ingress_pending_events(pending_by_key)
             handoff_complete = True

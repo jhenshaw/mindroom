@@ -6,7 +6,7 @@ import asyncio
 import enum
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 import nio
@@ -21,10 +21,12 @@ from .coalescing_batch import (
 from .commands.parsing import command_parser
 from .dispatch_handoff import QUEUED_NOTICE_METADATA_KIND, DispatchEvent, PreparedTextEvent, is_media_dispatch_event
 from .dispatch_source import (
+    ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
     HOOK_DISPATCH_SOURCE_KIND,
     HOOK_SOURCE_KIND,
     IMAGE_SOURCE_KIND,
     MEDIA_SOURCE_KIND,
+    MESSAGE_SOURCE_KIND,
     SCHEDULED_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_COALESCING_CLASS,
@@ -48,6 +50,8 @@ _UPLOAD_GRACE_MAX_HARD_CAP_SECONDS = 2.0
 _COALESCING_FLUSH_WARNING_SECONDS = 5.0
 # Poll while raw voice for the same key is still normalizing outside this gate.
 _VOICE_HANDOFF_POLL_SECONDS = 0.05
+# Let same-burst routed voice handoffs join active text without restoring debounce latency.
+_ACTIVE_FOLLOW_UP_VOICE_JOIN_GRACE_SECONDS = 0.05
 _COALESCING_EXEMPT_SOURCE_KINDS: frozenset[str] = frozenset(
     {
         HOOK_SOURCE_KIND,
@@ -216,6 +220,34 @@ class CoalescingGate:
         self._ensure_drain_task(new_key, owner_gate)
         self._wake(owner_gate)
 
+    def mark_voice_handoff_pending(self, key: CoalescingKey) -> None:
+        """Make eligible queued text under this key wait for an incoming raw voice handoff."""
+        gate = self._gates.get(key)
+        if gate is None:
+            return
+        if self._mark_gate_voice_handoff_pending(gate):
+            self._ensure_drain_task(key, gate)
+            self._wake(gate)
+
+    def _mark_gate_voice_handoff_pending(self, gate: _GateEntry) -> bool:
+        """Convert eligible queued text into voice-class work for this gate."""
+        updated_queue: deque[_QueuedEvent] = deque()
+        changed = False
+        for queued in gate.queue:
+            pending_event = queued.pending_event
+            updated = queued
+            if self._pending_event_can_join_voice_handoff(pending_event):
+                pending_event = replace(pending_event, coalescing_class=VOICE_COALESCING_CLASS)
+                updated = _QueuedEvent(self._queue_kind(pending_event), pending_event)
+                changed = True
+            updated_queue.append(updated)
+        if not changed:
+            return False
+        gate.queue.clear()
+        for queued in updated_queue:
+            self._append_queued_event(gate, queued)
+        return True
+
     def _resolve_gate_entry(
         self,
         key: CoalescingKey,
@@ -301,6 +333,10 @@ class CoalescingGate:
         return False
 
     @staticmethod
+    def _queue_contains_voice(gate: _GateEntry) -> bool:
+        return any(queued.pending_event.coalescing_class == VOICE_COALESCING_CLASS for queued in gate.queue)
+
+    @staticmethod
     def _normal_events_should_coalesce(key: CoalescingKey, gate: _GateEntry) -> bool:
         return key[1] is not None or CoalescingGate._front_normal_run_contains_voice(gate)
 
@@ -332,6 +368,11 @@ class CoalescingGate:
 
     @staticmethod
     def _queue_kind(pending_event: PendingEvent) -> _QueueKind:
+        if (
+            pending_event.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+            and pending_event.coalescing_class != VOICE_COALESCING_CLASS
+        ):
+            return _QueueKind.BYPASS
         if any(
             item.requires_solo_batch and item.kind != QUEUED_NOTICE_METADATA_KIND
             for item in pending_event.dispatch_metadata
@@ -348,6 +389,39 @@ class CoalescingGate:
         if _is_command_event(pending_event.event, fallback_source_kind=pending_event.source_kind):
             return _QueueKind.COMMAND
         return _QueueKind.NORMAL
+
+    @staticmethod
+    def _pending_event_can_join_voice_handoff(pending_event: PendingEvent) -> bool:
+        if pending_event.coalescing_class == VOICE_COALESCING_CLASS:
+            return False
+        if pending_event.source_kind != MESSAGE_SOURCE_KIND or pending_event.hook_source is not None:
+            return False
+        if _is_command_event(pending_event.event, fallback_source_kind=pending_event.source_kind):
+            return False
+        return all(
+            not item.requires_solo_batch or item.kind == QUEUED_NOTICE_METADATA_KIND
+            for item in pending_event.dispatch_metadata
+        )
+
+    @staticmethod
+    def _active_follow_up_bypass_can_wait_for_voice_join(queued: _QueuedEvent) -> bool:
+        pending_event = queued.pending_event
+        return (
+            queued.kind is _QueueKind.BYPASS
+            and pending_event.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+            and pending_event.coalescing_class != VOICE_COALESCING_CLASS
+        )
+
+    @staticmethod
+    def _active_follow_up_voice_join_has_barrier(gate: _GateEntry) -> bool:
+        return any(
+            queued.kind is _QueueKind.COMMAND
+            or (
+                queued.pending_event.coalescing_class != VOICE_COALESCING_CLASS
+                and not CoalescingGate._pending_event_can_join_voice_handoff(queued.pending_event)
+            )
+            for queued in gate.queue
+        )
 
     def _enqueue_path(self, kind: _QueueKind) -> str:
         if kind is _QueueKind.BYPASS:
@@ -506,6 +580,18 @@ class CoalescingGate:
             return
         enqueue_start = time.monotonic()
         gate = self._get_or_create_gate(key)
+        incoming_has_voice = any(
+            pending_event.coalescing_class == VOICE_COALESCING_CLASS for pending_event in pending_events
+        )
+        if incoming_has_voice:
+            self._mark_gate_voice_handoff_pending(gate)
+        if incoming_has_voice or self._queue_contains_voice(gate):
+            pending_events = [
+                replace(pending_event, coalescing_class=VOICE_COALESCING_CLASS)
+                if self._pending_event_can_join_voice_handoff(pending_event)
+                else pending_event
+                for pending_event in pending_events
+            ]
         queued_events = [(self._queue_kind(pending_event), pending_event) for pending_event in pending_events]
         for kind, pending_event in queued_events:
             self._append_queued_event(gate, _QueuedEvent(kind, pending_event))
@@ -645,6 +731,27 @@ class CoalescingGate:
         gate.deadline = time.monotonic() + wait_seconds
         await self._wait_for_deadline(gate, gate.deadline)
 
+    async def _wait_for_active_follow_up_voice_join(self, gate: _GateEntry) -> bool:
+        """Briefly let a same-burst routed voice handoff join an active text follow-up."""
+        wait_seconds = _ACTIVE_FOLLOW_UP_VOICE_JOIN_GRACE_SECONDS
+        configured_debounce = max(self._debounce_seconds(), 0.0)
+        if configured_debounce <= 0:
+            return False
+        wait_seconds = min(wait_seconds, configured_debounce)
+        deadline = time.monotonic() + wait_seconds
+        gate.deadline = deadline
+        while True:
+            if self._queue_contains_voice(gate):
+                return True
+            if (
+                self._is_shutting_down()
+                or gate.drain_all_requested
+                or self._active_follow_up_voice_join_has_barrier(gate)
+            ):
+                return False
+            if not await self._wait_for_deadline(gate, deadline):
+                return False
+
     def _log_dispatch_failure(
         self,
         key: CoalescingKey,
@@ -773,6 +880,14 @@ class CoalescingGate:
 
                 front = gate.queue[0]
                 if front.kind in {_QueueKind.BYPASS, _QueueKind.COMMAND}:
+                    if (
+                        len(gate.queue) == 1
+                        and not gate.drain_all_requested
+                        and not self._is_shutting_down()
+                        and self._active_follow_up_bypass_can_wait_for_voice_join(front)
+                        and await self._wait_for_active_follow_up_voice_join(gate)
+                    ):
+                        continue
                     pending_events = self._claim_front_events(gate, 1)
                     await self._dispatch_claimed_events(
                         current_key,

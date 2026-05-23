@@ -28,7 +28,6 @@ class VoiceIngressItem:
     requester_user_id: str
     normalization_task: asyncio.Task[VoiceNormalizationResult | None]
     dispatch_timing: DispatchPipelineTiming | None
-    dispatch_policy_source_kind: str | None = None
     received_at: float = field(default_factory=time.monotonic)
     received_wall_time: float = field(default_factory=time.time)
 
@@ -47,6 +46,11 @@ def _close_text_ingress_item_metadata(items: list[TextIngressItem] | tuple[TextI
 
 def _raise_voice_coalescing_drain_entry_mismatch() -> Never:
     msg = "Voice coalescing drain entry mismatch"
+    raise RuntimeError(msg)
+
+
+def _raise_inconsistent_flush_callback() -> Never:
+    msg = "Voice coalescing burst received inconsistent flush callback"
     raise RuntimeError(msg)
 
 
@@ -117,6 +121,21 @@ type _FlushVoiceIngressBatch = Callable[[VoiceIngressBatch], Awaitable[None]]
 
 
 @dataclass
+class _UnresolvedVoiceReservation:
+    """A raw voice marker held while thread/cache resolution has not admitted it yet."""
+
+    _gate: VoiceCoalescingGate
+    _key: tuple[str, str]
+    _released: bool = False
+
+    def release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        self._gate._release_unresolved_voice_count(self._key)
+
+
+@dataclass
 class _QueuedVoice:
     item: VoiceIngressItem
     done: asyncio.Future[None]
@@ -148,6 +167,7 @@ class VoiceCoalescingGate:
         self._entries: dict[CoalescingKey, _VoiceBurstEntry] = {}
         self._claimed_text_buffers: dict[CoalescingKey, list[_ClaimedTextIngressBuffer]] = {}
         self._pending_voice_counts: dict[CoalescingKey, int] = {}
+        self._unresolved_pending_voice_counts: dict[tuple[str, str], int] = {}
         self._pending_voice_handoff_aliases: dict[CoalescingKey, set[CoalescingKey]] = {}
         self._drain_tasks: set[asyncio.Task[None]] = set()
 
@@ -155,7 +175,23 @@ class VoiceCoalescingGate:
         """Return whether raw voice for this key is waiting on debounce, STT, flush, or handoff."""
         if self._pending_voice_counts.get(key, 0) > 0:
             return True
+        if self._unresolved_pending_voice_counts.get((key[0], key[2]), 0) > 0:
+            return True
         return self._has_pending_aliased_voice_burst(key)
+
+    def reserve_unresolved_voice_handoff(self, room_id: str, requester_user_id: str) -> _UnresolvedVoiceReservation:
+        """Mark raw voice pending before slower thread-resolution admission starts."""
+        key = (room_id, requester_user_id)
+        self._unresolved_pending_voice_counts[key] = self._unresolved_pending_voice_counts.get(key, 0) + 1
+        return _UnresolvedVoiceReservation(self, key)
+
+    def _release_unresolved_voice_count(self, key: tuple[str, str]) -> None:
+        pending_count = self._unresolved_pending_voice_counts.get(key, 0)
+        remaining_count = pending_count - 1
+        if remaining_count > 0:
+            self._unresolved_pending_voice_counts[key] = remaining_count
+            return
+        self._unresolved_pending_voice_counts.pop(key, None)
 
     def alias_pending_voice_handoff(self, old_key: CoalescingKey, new_key: CoalescingKey) -> None:
         """Let a resolved downstream key wait for raw voice still tracked by the original key."""
@@ -225,23 +261,30 @@ class VoiceCoalescingGate:
         item: VoiceIngressItem,
         *,
         flush_batch: _FlushVoiceIngressBatch,
+        unresolved_reservation: _UnresolvedVoiceReservation | None = None,
     ) -> None:
         """Accept one raw voice event and wait until its claimed burst is flushed."""
-        entry = self._entries.get(key)
-        if entry is None:
-            entry = _VoiceBurstEntry(flush_batch=flush_batch)
-            self._entries[key] = entry
-        elif entry.flush_batch is None:
-            entry.flush_batch = flush_batch
-        elif entry.flush_batch != flush_batch:
-            msg = "Voice coalescing burst received inconsistent flush callback"
-            raise RuntimeError(msg)
+        try:
+            entry = self._entries.get(key)
+            if entry is None:
+                entry = _VoiceBurstEntry(flush_batch=flush_batch)
+                self._entries[key] = entry
+            elif entry.flush_batch is None:
+                entry.flush_batch = flush_batch
+            elif entry.flush_batch != flush_batch:
+                _raise_inconsistent_flush_callback()
 
-        done = asyncio.get_running_loop().create_future()
-        self._pending_voice_counts[key] = self._pending_voice_counts.get(key, 0) + 1
-        entry.voices.append(_QueuedVoice(item=item, done=done))
-        self._ensure_drain_task(key, entry)
-        self._wake(entry)
+            done = asyncio.get_running_loop().create_future()
+            self._pending_voice_counts[key] = self._pending_voice_counts.get(key, 0) + 1
+            entry.voices.append(_QueuedVoice(item=item, done=done))
+            if unresolved_reservation is not None:
+                unresolved_reservation.release()
+            self._ensure_drain_task(key, entry)
+            self._wake(entry)
+        except BaseException:
+            if unresolved_reservation is not None:
+                unresolved_reservation.release()
+            raise
         await done
 
     def _release_pending_voice_count(self, key: CoalescingKey, count: int) -> None:

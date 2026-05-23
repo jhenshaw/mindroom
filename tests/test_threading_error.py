@@ -4064,7 +4064,7 @@ class TestThreadingBehavior:
         thread_root_id = "$thread_root:localhost"
         thread_reply_id = "$thread_reply:localhost"
         plain_reply_id = "$plain_reply:localhost"
-        audio_event_id = "$audio_reply:localhost"
+        media_event_id = "$media_reply:localhost"
         room = _matrix_room(room_id)
         real_event_cache = SqliteEventCache(bot.storage_path / "media-ingress-thread-membership.db")
         await real_event_cache.initialize()
@@ -4073,22 +4073,22 @@ class TestThreadingBehavior:
             logger=MagicMock(),
             background_task_owner=bot._runtime_view,
         )
-        audio_event = nio.RoomMessageAudio.from_dict(
+        media_event = nio.RoomMessageImage.from_dict(
             {
                 "content": {
-                    "body": "voice-note.ogg",
-                    "msgtype": "m.audio",
-                    "url": "mxc://localhost/voice-note",
+                    "body": "image.png",
+                    "msgtype": "m.image",
+                    "url": "mxc://localhost/image",
                     "m.relates_to": {"m.in_reply_to": {"event_id": plain_reply_id}},
                 },
-                "event_id": audio_event_id,
+                "event_id": media_event_id,
                 "sender": "@user:localhost",
                 "origin_server_ts": 1234567896,
                 "room_id": room_id,
                 "type": "m.room.message",
             },
         )
-        prechecked_event = MagicMock(event=audio_event, requester_user_id="@user:localhost")
+        prechecked_event = MagicMock(event=media_event, requester_user_id="@user:localhost")
         bot._turn_controller._precheck_dispatch_event = MagicMock(return_value=prechecked_event)
         bot._turn_controller._dispatch_special_media_as_text = AsyncMock(return_value=True)
         bot._turn_controller._enqueue_for_dispatch = AsyncMock()
@@ -4134,10 +4134,10 @@ class TestThreadingBehavior:
         bot.client.room_get_event = AsyncMock(side_effect=fetch_related_event)
 
         try:
-            await bot._turn_controller.handle_media_event(room, audio_event)
+            await bot._turn_controller.handle_media_event(room, media_event)
             await _wait_for_room_cache_idle(bot.event_cache_write_coordinator)
 
-            assert await real_event_cache.get_thread_id_for_event(room_id, audio_event_id) == thread_root_id
+            assert await real_event_cache.get_thread_id_for_event(room_id, media_event_id) == thread_root_id
         finally:
             await real_event_cache.close()
 
