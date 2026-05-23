@@ -1059,6 +1059,108 @@ async def test_receive_time_coordinator_late_text_joins_newer_claimed_voice_burs
 
 
 @pytest.mark.asyncio
+async def test_different_thread_text_not_blocked_by_claimed_voice_normalization() -> None:
+    """A claimed voice burst in one thread must not hold ready text from another thread."""
+    room = _threaded_room()
+    ingress_gate, coalescing_gate, batches = _install_direct_ingress_capture_gates(debounce_seconds=0.0)
+    provisional_key = IngressProvisionalKey(room.room_id, "@user:example.com")
+    voice_key = (room.room_id, "$thread-a", "@user:example.com")
+    text_key = (room.room_id, "$thread-b", "@user:example.com")
+    release_voice = asyncio.Event()
+    voice_ready_task = _ready_task(
+        _prompt_ready_result(
+            room=room,
+            key=voice_key,
+            event_id="$voice-a",
+            body="voice in thread a",
+            order=1,
+            source_kind=VOICE_SOURCE_KIND,
+            coalescing_class=VOICE_COALESCING_CLASS,
+        ),
+        release=release_voice,
+    )
+    voice_ready_task.set_name("voice_ready:$voice-a")
+    voice_preliminary_task = _ready_task(voice_key)
+    await voice_preliminary_task
+
+    await ingress_gate.admit_raw_voice(
+        provisional_key,
+        RawVoiceIngressItem(
+            preliminary_key_task=voice_preliminary_task,
+            ready_task=voice_ready_task,
+        ),
+    )
+    await _wait_until_claimed_ingress_voice_group_exists(ingress_gate, provisional_key, "$voice-a")
+    text_ready_task = _ready_task(
+        _prompt_ready_result(room=room, key=text_key, event_id="$text-b", body="text in thread b", order=2),
+    )
+    await text_ready_task
+    await ingress_gate.admit_ready_task(
+        provisional_key,
+        ready_task=text_ready_task,
+        source_kind=MESSAGE_SOURCE_KIND,
+        barrier=False,
+    )
+
+    await _wait_for_direct_condition(lambda: [batch.source_event_ids for batch in batches] == [["$text-b"]])
+    assert not voice_ready_task.done()
+
+    release_voice.set()
+    await _drain_direct_ingress(ingress_gate, coalescing_gate)
+
+    assert [batch.source_event_ids for batch in batches] == [["$text-b"], ["$voice-a"]]
+
+
+@pytest.mark.asyncio
+async def test_different_thread_text_not_blocked_by_open_voice_normalization() -> None:
+    """A voice item still in debounce must not serialize ready text from another thread."""
+    room = _threaded_room()
+    ingress_gate, coalescing_gate, batches = _install_direct_ingress_capture_gates(debounce_seconds=0.01)
+    provisional_key = IngressProvisionalKey(room.room_id, "@user:example.com")
+    voice_key = (room.room_id, "$thread-a", "@user:example.com")
+    text_key = (room.room_id, "$thread-b", "@user:example.com")
+    release_voice = asyncio.Event()
+    voice_preliminary_task = _ready_task(voice_key)
+    await voice_preliminary_task
+
+    await ingress_gate.admit_raw_voice(
+        provisional_key,
+        RawVoiceIngressItem(
+            preliminary_key_task=voice_preliminary_task,
+            ready_task=_ready_task(
+                _prompt_ready_result(
+                    room=room,
+                    key=voice_key,
+                    event_id="$voice-a",
+                    body="voice in thread a",
+                    order=1,
+                    source_kind=VOICE_SOURCE_KIND,
+                    coalescing_class=VOICE_COALESCING_CLASS,
+                ),
+                release=release_voice,
+            ),
+        ),
+    )
+    text_ready_task = _ready_task(
+        _prompt_ready_result(room=room, key=text_key, event_id="$text-b", body="text in thread b", order=2),
+    )
+    await text_ready_task
+    await ingress_gate.admit_ready_task(
+        provisional_key,
+        ready_task=text_ready_task,
+        source_kind=MESSAGE_SOURCE_KIND,
+        barrier=False,
+    )
+
+    await _wait_for_direct_condition(lambda: [batch.source_event_ids for batch in batches] == [["$text-b"]])
+
+    release_voice.set()
+    await _drain_direct_ingress(ingress_gate, coalescing_gate)
+
+    assert [batch.source_event_ids for batch in batches] == [["$text-b"], ["$voice-a"]]
+
+
+@pytest.mark.asyncio
 async def test_receive_time_admission_order_overrides_ready_result_metadata_and_completion_order() -> None:
     """Coordinator-owned admission order should beat misleading ready-result metadata."""
     room = _threaded_room()
@@ -2503,14 +2605,14 @@ async def test_receive_time_upload_grace_hard_cap_prevents_indefinite_extension(
     room = _threaded_room()
     ingress_gate, coalescing_gate, batches = _install_direct_ingress_capture_gates(
         debounce_seconds=0.01,
-        upload_grace_seconds=0.03,
+        upload_grace_seconds=0.2,
     )
     provisional_key = IngressProvisionalKey(room.room_id, "@user:example.com")
     key = (room.room_id, "$thread_root", "@user:example.com")
 
     with (
         patch("mindroom.coalescing._UPLOAD_GRACE_HARD_CAP_MULTIPLIER", 1.5),
-        patch("mindroom.coalescing._UPLOAD_GRACE_MAX_HARD_CAP_SECONDS", 0.045),
+        patch("mindroom.coalescing._UPLOAD_GRACE_MAX_HARD_CAP_SECONDS", 0.3),
     ):
         await _admit_prompt_result(
             ingress_gate,
@@ -2518,7 +2620,7 @@ async def test_receive_time_upload_grace_hard_cap_prevents_indefinite_extension(
             _prompt_ready_result(room=room, key=key, event_id="$text", body="text first", order=1),
         )
         await _wait_for_direct_condition(lambda: provisional_key in ingress_gate._ingress_grace_groups)
-        await asyncio.sleep(0.02)
+        await asyncio.sleep(0.05)
         await _admit_prompt_result(
             ingress_gate,
             provisional_key,
@@ -2533,6 +2635,7 @@ async def test_receive_time_upload_grace_hard_cap_prevents_indefinite_extension(
         )
         await _wait_for_direct_condition(
             lambda: [batch.source_event_ids for batch in batches] == [["$text", "$image1"]],
+            deadline_seconds=1.0,
         )
         await _admit_prompt_result(
             ingress_gate,

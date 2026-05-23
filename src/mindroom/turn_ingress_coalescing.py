@@ -12,7 +12,7 @@ import asyncio
 import contextlib
 import time
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from .coalescing import upload_grace_hard_cap_seconds
 from .coalescing_batch import close_pending_event_metadata
@@ -27,6 +27,13 @@ if TYPE_CHECKING:
     from mindroom.coalescing_batch import CoalescingKey, PendingEvent
 
 logger = get_logger(__name__)
+
+
+class _UnknownPreliminaryKey:
+    """Sentinel for admissions whose preliminary thread key has not resolved."""
+
+
+_UNKNOWN_PRELIMINARY_KEY = _UnknownPreliminaryKey()
 
 
 @dataclass(frozen=True)
@@ -236,15 +243,27 @@ class TurnIngressCoalescingGate:
             if grace_group is not None and grace_group.accepting_late_prompts:
                 self._seal_grace_group(provisional_key)
 
-        open_group = self._ingress_open_groups.get(provisional_key)
-        if open_group is not None:
-            self._append_to_group(provisional_key, open_group, admission)
+        if self._try_append_to_open_group_or_seal(provisional_key, admission):
             return
 
         if await self._append_voice_admission_to_latest_draining_group(provisional_key, admission):
             return
 
         self._append_to_open_prompt_group(provisional_key, admission)
+
+    def _try_append_to_open_group_or_seal(
+        self,
+        provisional_key: IngressProvisionalKey,
+        admission: _ReadyIngressAdmission,
+    ) -> bool:
+        open_group = self._ingress_open_groups.get(provisional_key)
+        if open_group is None:
+            return False
+        if self._group_can_accept_late_prompt(open_group, admission):
+            self._append_to_group(provisional_key, open_group, admission)
+            return True
+        self._seal_group_for_barrier(provisional_key, open_group)
+        return False
 
     def _append_to_open_prompt_group(
         self,
@@ -253,17 +272,24 @@ class TurnIngressCoalescingGate:
     ) -> None:
         group = self._ingress_open_groups.get(provisional_key)
         if group is None:
-            group = self._new_ingress_prompt_group(provisional_key)
+            group = self._new_ingress_prompt_group(provisional_key, admission)
             self._ingress_open_groups[provisional_key] = group
         self._append_to_group(provisional_key, group, admission)
 
-    def _new_ingress_prompt_group(self, provisional_key: IngressProvisionalKey) -> _IngressPromptGroup:
+    def _new_ingress_prompt_group(
+        self,
+        provisional_key: IngressProvisionalKey,
+        admission: _ReadyIngressAdmission,
+    ) -> _IngressPromptGroup:
         """Create a group that dispatches after older groups for the same receive key."""
         return _IngressPromptGroup(
             predecessor_drain_tasks=tuple(
                 task
-                for task in (group.drain_task for group in self._ingress_draining_groups.get(provisional_key, ()))
-                if task is not None and not task.done()
+                for group in self._ingress_draining_groups.get(provisional_key, ())
+                for task in (group.drain_task,)
+                if task is not None
+                and not task.done()
+                and self._group_can_dispatch_before_new_admission(group, admission) is False
             ),
         )
 
@@ -480,7 +506,7 @@ class TurnIngressCoalescingGate:
         if not claimed_groups:
             return False
         for group in reversed(claimed_groups):
-            if group.accepting_late_prompts:
+            if group.accepting_late_prompts and self._group_can_accept_late_prompt(group, admission):
                 group.items.append(admission)
                 group.admission_generation += 1
                 admission.ready_task.add_done_callback(
@@ -1205,6 +1231,87 @@ class TurnIngressCoalescingGate:
         return not admission.ready_task.done() or (
             admission.preliminary_key_task is not None and not admission.preliminary_key_task.done()
         )
+
+    def _group_can_accept_late_prompt(
+        self,
+        group: _IngressPromptGroup,
+        admission: _ReadyIngressAdmission,
+    ) -> bool:
+        admission_key = self._prompt_preliminary_key_status(admission)
+        if admission_key is _UNKNOWN_PRELIMINARY_KEY:
+            return True
+        if admission_key is None:
+            return True
+        group_keys, has_unknown_key = self._group_preliminary_key_state(group)
+        return has_unknown_key or not group_keys or admission_key in group_keys
+
+    def _group_can_dispatch_before_new_admission(
+        self,
+        group: _IngressPromptGroup,
+        admission: _ReadyIngressAdmission,
+    ) -> bool:
+        admission_key = self._prompt_preliminary_key_status(admission)
+        if admission_key is _UNKNOWN_PRELIMINARY_KEY or admission_key is None:
+            return False
+        group_keys, has_unknown_key = self._group_preliminary_key_state(group)
+        return bool(group_keys) and not has_unknown_key and admission_key not in group_keys
+
+    def _group_preliminary_key_state(self, group: _IngressPromptGroup) -> tuple[set[CoalescingKey], bool]:
+        keys: set[CoalescingKey] = set()
+        has_unknown_key = False
+        for admission in self._unclaimed_group_admissions(group):
+            key = self._prompt_preliminary_key_status(admission)
+            if key is _UNKNOWN_PRELIMINARY_KEY:
+                has_unknown_key = True
+            elif key is not None:
+                keys.add(cast("CoalescingKey", key))
+        return keys, has_unknown_key
+
+    def _prompt_preliminary_key_status(
+        self,
+        admission: _ReadyIngressAdmission,
+    ) -> CoalescingKey | _UnknownPreliminaryKey | None:
+        if admission.preliminary_key_task is not None:
+            return self._preliminary_key_task_status(admission.preliminary_key_task)
+        return self._ready_task_preliminary_key_status(admission)
+
+    @staticmethod
+    def _preliminary_key_task_status(
+        task: asyncio.Task[CoalescingKey],
+    ) -> CoalescingKey | _UnknownPreliminaryKey | None:
+        if not task.done() or task.cancelled():
+            return _UNKNOWN_PRELIMINARY_KEY
+        try:
+            return task.result()
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:
+            return None
+
+    def _ready_task_preliminary_key_status(
+        self,
+        admission: _ReadyIngressAdmission,
+    ) -> CoalescingKey | _UnknownPreliminaryKey | None:
+        if not admission.ready_task.done() or admission.ready_task.cancelled():
+            return _UNKNOWN_PRELIMINARY_KEY
+        try:
+            result = admission.ready_task.result()
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:
+            return None
+        result = self._ready_result_with_admission_metadata(
+            result,
+            admission=admission,
+            preliminary_key=None,
+        )
+        if isinstance(result, PromptReadyIngressResult):
+            return result.preliminary_key
+        if isinstance(result, BarrierReadyIngressResult):
+            return _UNKNOWN_PRELIMINARY_KEY
+        if isinstance(result, DropReadyIngressResult) and result.split_prompt_group:
+            return _UNKNOWN_PRELIMINARY_KEY
+        return None
 
     @classmethod
     def _ready_prefix_length(cls, admissions: list[_ReadyIngressAdmission]) -> int:
