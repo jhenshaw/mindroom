@@ -172,8 +172,8 @@ class TurnIngressCoalescingGate:
         if barrier:
             if await self._dispatch_barrier_after_accepting_groups(provisional_key, admission):
                 return
-            await self._wait_for_barrier_predecessor_groups(self._groups_for_provisional_key(provisional_key))
-            await self._forward_independent_ready_admission(admission)
+            task = self._admit_independent_barrier_admission(provisional_key, admission)
+            await task
             return
         await self._admit_prompt_admission(provisional_key, admission)
 
@@ -266,6 +266,47 @@ class TurnIngressCoalescingGate:
             admission.preliminary_key_task.add_done_callback(lambda _task: self._wake_ingress_group(group))
         self._ensure_ingress_drain_task(provisional_key, group)
         self._wake_ingress_group(group)
+
+    def _admit_independent_barrier_admission(
+        self,
+        provisional_key: IngressProvisionalKey,
+        admission: _ReadyIngressAdmission,
+    ) -> asyncio.Task[None]:
+        predecessor_groups = self._groups_for_provisional_key(provisional_key)
+        group = _IngressPromptGroup(items=[admission], accepting_late_prompts=False, force_dispatch=True)
+        admission.ready_task.add_done_callback(lambda _task: self._wake_ingress_group(group))
+        task = asyncio.create_task(
+            self._dispatch_independent_barrier_admission(
+                provisional_key,
+                group=group,
+                predecessor_groups=predecessor_groups,
+                admission=admission,
+            ),
+            name=f"turn_ingress_barrier:{provisional_key.room_id}:{provisional_key.requester_user_id}",
+        )
+        group.drain_task = task
+        self._register_draining_group(provisional_key, group)
+        self._ingress_drain_tasks.add(task)
+        task.add_done_callback(self._finish_ingress_drain_task)
+        self._wake_ingress_group(group)
+        return task
+
+    async def _dispatch_independent_barrier_admission(
+        self,
+        provisional_key: IngressProvisionalKey,
+        *,
+        group: _IngressPromptGroup,
+        predecessor_groups: tuple[_IngressPromptGroup, ...],
+        admission: _ReadyIngressAdmission,
+    ) -> None:
+        try:
+            await self._wait_for_barrier_predecessor_groups(predecessor_groups)
+            await self._forward_independent_ready_admission(admission)
+        finally:
+            group.accepting_late_prompts = False
+            self._remove_draining_group(provisional_key, group)
+            if group.drain_task is asyncio.current_task():
+                group.drain_task = None
 
     def _groups_for_provisional_key(self, provisional_key: IngressProvisionalKey) -> tuple[_IngressPromptGroup, ...]:
         groups = [

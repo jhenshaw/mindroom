@@ -1291,6 +1291,49 @@ async def test_known_barrier_waits_for_older_prompt_group_to_enqueue() -> None:
 
 
 @pytest.mark.asyncio
+async def test_known_barrier_without_existing_group_blocks_later_prompt_until_ready() -> None:
+    """A delayed command/barrier received first must stay before later prompts."""
+    room = _threaded_room()
+    ingress_gate, coalescing_gate, batches = _install_direct_ingress_capture_gates(debounce_seconds=0.0)
+    provisional_key = IngressProvisionalKey(room.room_id, "@user:example.com")
+    key = (room.room_id, "$thread", "@user:example.com")
+    release_barrier = asyncio.Event()
+
+    barrier_task = asyncio.create_task(
+        _admit_prompt_result(
+            ingress_gate,
+            provisional_key,
+            _barrier_ready_result(room=room, key=key, event_id="$command", order=1),
+            barrier=True,
+            release=release_barrier,
+        ),
+    )
+    try:
+        await asyncio.sleep(0)
+        await _admit_prompt_result(
+            ingress_gate,
+            provisional_key,
+            _prompt_ready_result(room=room, key=key, event_id="$text", body="text", order=2),
+        )
+        await asyncio.sleep(0.02)
+        await coalescing_gate.drain_all()
+
+        assert batches == []
+
+        release_barrier.set()
+        await asyncio.wait_for(barrier_task, timeout=1.0)
+        await _drain_direct_ingress(ingress_gate, coalescing_gate)
+    finally:
+        release_barrier.set()
+        if not barrier_task.done():
+            barrier_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await barrier_task
+
+    assert [batch.source_event_ids for batch in batches] == [["$command"], ["$text"]]
+
+
+@pytest.mark.asyncio
 async def test_known_barrier_flushes_ready_open_group_before_older_unresolved_group() -> None:
     """Barrier ordering is based on receive order, not internal group container order."""
     room = _threaded_room()
