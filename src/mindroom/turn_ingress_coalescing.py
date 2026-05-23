@@ -142,11 +142,13 @@ class TurnIngressCoalescingGate:
         upload_grace_seconds: Callable[[], float],
         is_shutting_down: Callable[[], bool],
         coalescing_gate: CoalescingGate | None = None,
+        on_unresolved_admission_cancelled: Callable[[], None] | None = None,
     ) -> None:
         self._debounce_seconds = debounce_seconds
         self._upload_grace_seconds = upload_grace_seconds
         self._is_shutting_down = is_shutting_down
         self._coalescing_gate = coalescing_gate
+        self._on_unresolved_admission_cancelled = on_unresolved_admission_cancelled
         self._next_received_order = 0
         self._ingress_open_groups: dict[IngressProvisionalKey, _IngressPromptGroup] = {}
         self._ingress_grace_groups: dict[IngressProvisionalKey, _IngressPromptGroup] = {}
@@ -731,6 +733,8 @@ class TurnIngressCoalescingGate:
                 cancelled_tasks.append(task)
         if cancelled_tasks:
             self._cancelled_unresolved_admissions = True
+            if self._on_unresolved_admission_cancelled is not None:
+                self._on_unresolved_admission_cancelled()
         return tuple(cancelled_tasks)
 
     def _close_ready_metadata_when_cancelling_preliminary(self, admission: _ReadyIngressAdmission) -> None:
@@ -1117,6 +1121,11 @@ class TurnIngressCoalescingGate:
                 finally:
                     self._finish_group_ordering_future(group, ordering_future)
                 continue
+            independent_ready = self._ready_admissions_independent_of_pending_work(ordered_items)
+            if independent_ready:
+                self._claim_group_admissions(group, independent_ready)
+                await self._dispatch_prompt_admissions(independent_ready)
+                continue
             if self._admissions_have_pending_work(ordered_items):
                 await self._wait_for_ingress_admission_progress(ordered_items, group=group)
                 continue
@@ -1160,6 +1169,11 @@ class TurnIngressCoalescingGate:
                             )
                     processed_admission_ids.add(id(split_admission))
                     await self._dispatch_split_result(split_result)
+                    continue
+                independent_ready = self._ready_admissions_independent_of_pending_work(ordered_items)
+                if independent_ready:
+                    processed_admission_ids.update(id(admission) for admission in independent_ready)
+                    await self._dispatch_prompt_admissions(independent_ready)
                     continue
                 if self._admissions_have_pending_work(ordered_items):
                     await self._wait_for_ingress_admission_progress(ordered_items, group=None)
@@ -1218,6 +1232,31 @@ class TurnIngressCoalescingGate:
     def _admissions_have_pending_work(admissions: list[_ReadyIngressAdmission]) -> bool:
         return any(TurnIngressCoalescingGate._admission_has_pending_work(admission) for admission in admissions)
 
+    def _ready_admissions_independent_of_pending_work(
+        self,
+        admissions: list[_ReadyIngressAdmission],
+    ) -> list[_ReadyIngressAdmission]:
+        pending_keys, has_unknown_pending_key = self._preliminary_key_state(
+            admissions,
+            pending_only=True,
+            none_is_unknown=True,
+        )
+        if has_unknown_pending_key or not pending_keys:
+            return []
+
+        ready_admissions: list[_ReadyIngressAdmission] = []
+        for admission in admissions:
+            if self._admission_has_pending_work(admission):
+                continue
+            admission_key = self._prompt_preliminary_key_status(admission)
+            if (
+                admission_key is not _UNKNOWN_PRELIMINARY_KEY
+                and admission_key is not None
+                and admission_key not in pending_keys
+            ):
+                ready_admissions.append(admission)
+        return ready_admissions
+
     @staticmethod
     def _group_has_barrier_admission(group: _IngressPromptGroup) -> bool:
         return any(admission.is_barrier for admission in group.items)
@@ -1242,7 +1281,7 @@ class TurnIngressCoalescingGate:
             return True
         if admission_key is None:
             return True
-        group_keys, has_unknown_key = self._group_preliminary_key_state(group)
+        group_keys, has_unknown_key = self._preliminary_key_state(self._unclaimed_group_admissions(group))
         return has_unknown_key or not group_keys or admission_key in group_keys
 
     def _group_can_dispatch_before_new_admission(
@@ -1253,15 +1292,23 @@ class TurnIngressCoalescingGate:
         admission_key = self._prompt_preliminary_key_status(admission)
         if admission_key is _UNKNOWN_PRELIMINARY_KEY or admission_key is None:
             return False
-        group_keys, has_unknown_key = self._group_preliminary_key_state(group)
+        group_keys, has_unknown_key = self._preliminary_key_state(self._unclaimed_group_admissions(group))
         return bool(group_keys) and not has_unknown_key and admission_key not in group_keys
 
-    def _group_preliminary_key_state(self, group: _IngressPromptGroup) -> tuple[set[CoalescingKey], bool]:
+    def _preliminary_key_state(
+        self,
+        admissions: list[_ReadyIngressAdmission],
+        *,
+        pending_only: bool = False,
+        none_is_unknown: bool = False,
+    ) -> tuple[set[CoalescingKey], bool]:
         keys: set[CoalescingKey] = set()
         has_unknown_key = False
-        for admission in self._unclaimed_group_admissions(group):
+        for admission in admissions:
+            if pending_only and not self._admission_has_pending_work(admission):
+                continue
             key = self._prompt_preliminary_key_status(admission)
-            if key is _UNKNOWN_PRELIMINARY_KEY:
+            if key is _UNKNOWN_PRELIMINARY_KEY or (key is None and none_is_unknown):
                 has_unknown_key = True
             elif key is not None:
                 keys.add(cast("CoalescingKey", key))

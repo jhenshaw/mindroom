@@ -1091,16 +1091,18 @@ async def test_different_thread_text_not_blocked_by_claimed_voice_normalization(
         ),
     )
     await _wait_until_claimed_ingress_voice_group_exists(ingress_gate, provisional_key, "$voice-a")
+    release_text = asyncio.Event()
     text_ready_task = _ready_task(
         _prompt_ready_result(room=room, key=text_key, event_id="$text-b", body="text in thread b", order=2),
+        release=release_text,
     )
-    await text_ready_task
     await ingress_gate.admit_ready_task(
         provisional_key,
         ready_task=text_ready_task,
         source_kind=MESSAGE_SOURCE_KIND,
         barrier=False,
     )
+    release_text.set()
 
     await _wait_for_direct_condition(lambda: [batch.source_event_ids for batch in batches] == [["$text-b"]])
     assert not voice_ready_task.done()
@@ -1141,16 +1143,18 @@ async def test_different_thread_text_not_blocked_by_open_voice_normalization() -
             ),
         ),
     )
+    release_text = asyncio.Event()
     text_ready_task = _ready_task(
         _prompt_ready_result(room=room, key=text_key, event_id="$text-b", body="text in thread b", order=2),
+        release=release_text,
     )
-    await text_ready_task
     await ingress_gate.admit_ready_task(
         provisional_key,
         ready_task=text_ready_task,
         source_kind=MESSAGE_SOURCE_KIND,
         barrier=False,
     )
+    release_text.set()
 
     await _wait_for_direct_condition(lambda: [batch.source_event_ids for batch in batches] == [["$text-b"]])
 

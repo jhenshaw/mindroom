@@ -456,6 +456,45 @@ async def test_prepare_for_sync_shutdown_clears_checkpoint_for_late_unresolved_i
 
 
 @pytest.mark.asyncio
+async def test_late_unresolved_ingress_after_shutdown_checkpoint_clears_saved_token(tmp_path: Path) -> None:
+    """A callback admission after checkpoint flush must still poison sync continuity."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.client.next_batch = "s_after_event"
+    bot._sync_trust_state = SyncTrustState.CERTIFIED
+    bot._sync_checkpoint = SyncCheckpoint("s_after_event")
+    bot._coalescing_gate.drain_all = AsyncMock()
+
+    await bot.prepare_for_sync_shutdown()
+
+    assert load_sync_token_record(tmp_path, bot.agent_name) is not None
+
+    release_ready_task = asyncio.Event()
+
+    async def unresolved_ready_result() -> None:
+        await release_ready_task.wait()
+
+    late_ready_task = asyncio.create_task(unresolved_ready_result())
+    try:
+        await bot._turn_ingress_gate.admit_ready_task(
+            IngressProvisionalKey("!room:localhost", "@user:localhost"),
+            ready_task=late_ready_task,
+            source_kind="message",
+            barrier=False,
+        )
+    finally:
+        if not late_ready_task.done():
+            late_ready_task.cancel()
+        await asyncio.gather(late_ready_task, return_exceptions=True)
+
+    assert late_ready_task.cancelled()
+    assert load_sync_token_record(tmp_path, bot.agent_name) is None
+    assert bot._sync_trust_state is SyncTrustState.UNCERTAIN
+    assert bot._sync_checkpoint is None
+    assert bot.client.next_batch is None
+
+
+@pytest.mark.asyncio
 async def test_prepare_for_sync_shutdown_skips_precallback_uncertified_token(tmp_path: Path) -> None:
     """Shutdown must not flush a nio-advanced token before sync-response certification starts."""
     bot = _agent_bot(tmp_path)

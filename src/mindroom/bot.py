@@ -367,6 +367,7 @@ class AgentBot:
             debounce_seconds=lambda: self.config.defaults.coalescing.debounce_ms / 1000,
             upload_grace_seconds=lambda: self.config.defaults.coalescing.upload_grace_ms / 1000,
             is_shutting_down=lambda: self._sync_shutting_down,
+            on_unresolved_admission_cancelled=self._clear_sync_checkpoint_after_unresolved_ingress_shutdown,
         )
         self._coalescing_gate = CoalescingGate(
             dispatch_batch=self._dispatch_coalesced_batch,
@@ -1428,14 +1429,11 @@ class AgentBot:
         self._sync_shutting_down = True
         await self._cancel_startup_thread_prewarm()
         dropped_unresolved_ingress = self._turn_ingress_gate.cancel_unresolved_admissions()
-        if dropped_unresolved_ingress:
-            self._clear_sync_checkpoint_after_unresolved_ingress_shutdown()
         try:
             await self._turn_ingress_gate.drain_all()
             await self._coalescing_gate.drain_all()
         finally:
             if self._turn_ingress_gate.cancelled_unresolved_admissions and not dropped_unresolved_ingress:
-                self._clear_sync_checkpoint_after_unresolved_ingress_shutdown()
                 dropped_unresolved_ingress = True
         if not dropped_unresolved_ingress and self._sync_trust_state is SyncTrustState.CERTIFIED:
             self._save_sync_checkpoint(self._sync_checkpoint)
