@@ -411,6 +411,51 @@ async def test_prepare_for_sync_shutdown_clears_checkpoint_before_raising_drain_
 
 
 @pytest.mark.asyncio
+async def test_prepare_for_sync_shutdown_clears_checkpoint_for_late_unresolved_ingress(tmp_path: Path) -> None:
+    """Late admissions after shutdown starts must be cancelled and must poison the sync checkpoint."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.client.next_batch = "s_after_event"
+    bot._sync_trust_state = SyncTrustState.CERTIFIED
+    bot._sync_checkpoint = SyncCheckpoint("s_after_event")
+    save_sync_token(tmp_path, bot.agent_name, "s_after_event")
+    original_drain_all = bot._turn_ingress_gate.drain_all
+    release_ready_task = asyncio.Event()
+    late_ready_task: asyncio.Task[None] | None = None
+
+    async def unresolved_ready_result() -> None:
+        await release_ready_task.wait()
+
+    async def drain_after_late_admission() -> None:
+        nonlocal late_ready_task
+        late_ready_task = asyncio.create_task(unresolved_ready_result())
+        await bot._turn_ingress_gate.admit_ready_task(
+            IngressProvisionalKey("!room:localhost", "@user:localhost"),
+            ready_task=late_ready_task,
+            source_kind="message",
+            barrier=False,
+        )
+        await original_drain_all()
+
+    bot._turn_ingress_gate.drain_all = AsyncMock(side_effect=drain_after_late_admission)
+
+    try:
+        await asyncio.wait_for(bot.prepare_for_sync_shutdown(), timeout=0.5)
+    finally:
+        if late_ready_task is not None and not late_ready_task.done():
+            late_ready_task.cancel()
+        if late_ready_task is not None:
+            await asyncio.gather(late_ready_task, return_exceptions=True)
+
+    assert late_ready_task is not None
+    assert late_ready_task.cancelled()
+    assert load_sync_token_record(tmp_path, bot.agent_name) is None
+    assert bot._sync_trust_state is SyncTrustState.UNCERTAIN
+    assert bot._sync_checkpoint is None
+    assert bot.client.next_batch is None
+
+
+@pytest.mark.asyncio
 async def test_prepare_for_sync_shutdown_skips_precallback_uncertified_token(tmp_path: Path) -> None:
     """Shutdown must not flush a nio-advanced token before sync-response certification starts."""
     bot = _agent_bot(tmp_path)

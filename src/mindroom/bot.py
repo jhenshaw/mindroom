@@ -988,6 +988,16 @@ class AgentBot:
         except OSError as exc:
             self.logger.warning("matrix_sync_token_clear_failed", error=str(exc))
 
+    def _clear_sync_checkpoint_after_unresolved_ingress_shutdown(self) -> None:
+        """Poison sync continuity after received ingress was dropped during shutdown."""
+        self._sync_trust_state = SyncTrustState.UNCERTAIN
+        self._sync_checkpoint = None
+        if self.client is not None:
+            client = cast("Any", self.client)
+            client.next_batch = None
+        self._clear_saved_sync_token()
+        self.logger.warning("matrix_sync_checkpoint_cleared_after_unresolved_ingress_shutdown")
+
     def _apply_sync_certification_decision(
         self,
         decision: SyncCertificationDecision,
@@ -1419,15 +1429,14 @@ class AgentBot:
         await self._cancel_startup_thread_prewarm()
         dropped_unresolved_ingress = self._turn_ingress_gate.cancel_unresolved_admissions()
         if dropped_unresolved_ingress:
-            self._sync_trust_state = SyncTrustState.UNCERTAIN
-            self._sync_checkpoint = None
-            if self.client is not None:
-                client = cast("Any", self.client)
-                client.next_batch = None
-            self._clear_saved_sync_token()
-            self.logger.warning("matrix_sync_checkpoint_cleared_after_unresolved_ingress_shutdown")
-        await self._turn_ingress_gate.drain_all()
-        await self._coalescing_gate.drain_all()
+            self._clear_sync_checkpoint_after_unresolved_ingress_shutdown()
+        try:
+            await self._turn_ingress_gate.drain_all()
+            await self._coalescing_gate.drain_all()
+        finally:
+            if self._turn_ingress_gate.cancelled_unresolved_admissions and not dropped_unresolved_ingress:
+                self._clear_sync_checkpoint_after_unresolved_ingress_shutdown()
+                dropped_unresolved_ingress = True
         if not dropped_unresolved_ingress and self._sync_trust_state is SyncTrustState.CERTIFIED:
             self._save_sync_checkpoint(self._sync_checkpoint)
         if self.agent_name != ROUTER_AGENT_NAME:

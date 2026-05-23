@@ -12,7 +12,7 @@ import asyncio
 import contextlib
 import time
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .coalescing import upload_grace_hard_cap_seconds
 from .coalescing_batch import close_pending_event_metadata
@@ -146,6 +146,7 @@ class TurnIngressCoalescingGate:
         self._ingress_claimed_voice_groups: dict[IngressProvisionalKey, list[_IngressPromptGroup]] = {}
         self._ingress_drain_tasks: set[asyncio.Task[None]] = set()
         self._ingress_drain_errors: list[BaseException] = []
+        self._cancelled_unresolved_admissions = False
 
     def claim_received_metadata(self) -> tuple[int, float]:
         """Reserve the coordinator-owned receive order and wall-clock timestamp."""
@@ -175,6 +176,8 @@ class TurnIngressCoalescingGate:
             coalescing_class=coalescing_class,
             is_barrier=barrier,
         )
+        if self._is_shutting_down() and await self._cancel_late_shutdown_admission(admission):
+            return
         if barrier:
             if await self._dispatch_barrier_after_accepting_groups(provisional_key, admission):
                 return
@@ -195,6 +198,8 @@ class TurnIngressCoalescingGate:
             preliminary_key_task=item.preliminary_key_task,
             owned_tasks=item.owned_tasks,
         )
+        if self._is_shutting_down() and await self._cancel_late_shutdown_admission(admission):
+            return
         await self._admit_prompt_admission(provisional_key, admission)
 
     async def _admit_prompt_admission(
@@ -666,19 +671,38 @@ class TurnIngressCoalescingGate:
         cancelled_unresolved = False
         for group in self._all_ingress_prompt_groups():
             for admission in group.items:
-                self._close_ready_metadata_when_cancelling_preliminary(admission)
-                if admission.preliminary_key_task is not None and not admission.preliminary_key_task.done():
-                    admission.preliminary_key_task.cancel()
-                    cancelled_unresolved = True
-                if not admission.ready_task.done():
-                    admission.ready_task.cancel()
-                    cancelled_unresolved = True
-                for task in admission.owned_tasks:
-                    if not task.done():
-                        task.cancel()
-                        cancelled_unresolved = True
+                cancelled_unresolved = bool(self._cancel_unresolved_admission(admission)) or cancelled_unresolved
             self._wake_ingress_group(group)
         return cancelled_unresolved
+
+    @property
+    def cancelled_unresolved_admissions(self) -> bool:
+        """Return whether shutdown has cancelled any unresolved admission."""
+        return self._cancelled_unresolved_admissions
+
+    async def _cancel_late_shutdown_admission(self, admission: _ReadyIngressAdmission) -> bool:
+        cancelled_tasks = self._cancel_unresolved_admission(admission)
+        if not cancelled_tasks:
+            return False
+        await asyncio.gather(*cancelled_tasks, return_exceptions=True)
+        return True
+
+    def _cancel_unresolved_admission(self, admission: _ReadyIngressAdmission) -> tuple[asyncio.Task[Any], ...]:
+        self._close_ready_metadata_when_cancelling_preliminary(admission)
+        cancelled_tasks: list[asyncio.Task[Any]] = []
+        if admission.preliminary_key_task is not None and not admission.preliminary_key_task.done():
+            admission.preliminary_key_task.cancel()
+            cancelled_tasks.append(admission.preliminary_key_task)
+        if not admission.ready_task.done():
+            admission.ready_task.cancel()
+            cancelled_tasks.append(admission.ready_task)
+        for task in admission.owned_tasks:
+            if not task.done():
+                task.cancel()
+                cancelled_tasks.append(task)
+        if cancelled_tasks:
+            self._cancelled_unresolved_admissions = True
+        return tuple(cancelled_tasks)
 
     def _close_ready_metadata_when_cancelling_preliminary(self, admission: _ReadyIngressAdmission) -> None:
         if (
