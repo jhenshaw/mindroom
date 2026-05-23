@@ -2575,6 +2575,7 @@ class TurnController:
                 provisional_key,
                 ready_task=ready_task,
                 source_kind=source_kind,
+                may_resolve_barrier=(is_file_message_event(event) and is_v2_sidecar_text_preview(event.source)),
                 barrier=False,
             )
         except BaseException:

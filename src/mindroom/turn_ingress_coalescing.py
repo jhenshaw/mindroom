@@ -104,6 +104,7 @@ class _ReadyIngressAdmission:
     coalescing_class: str | None = None
     is_raw_voice: bool = False
     is_barrier: bool = False
+    may_resolve_barrier: bool = False
     preliminary_key_task: asyncio.Task[CoalescingKey] | None = None
     owned_tasks: tuple[asyncio.Task[object], ...] = ()
 
@@ -175,6 +176,7 @@ class TurnIngressCoalescingGate:
         source_kind: str | None = None,
         coalescing_class: str | None = None,
         barrier: bool,
+        may_resolve_barrier: bool = False,
     ) -> None:
         """Admit one text/media/barrier ready task before slow resolution completes."""
         received_order, received_wall_time = self.claim_received_metadata()
@@ -185,6 +187,7 @@ class TurnIngressCoalescingGate:
             source_kind=source_kind,
             coalescing_class=coalescing_class,
             is_barrier=barrier,
+            may_resolve_barrier=may_resolve_barrier,
         )
         if self._is_shutting_down():
             await self._cancel_late_shutdown_admission(admission)
@@ -222,30 +225,8 @@ class TurnIngressCoalescingGate:
         if self._append_to_latest_claimed_voice_group(provisional_key, admission):
             return
 
-        grace_group = self._ingress_grace_groups.get(provisional_key)
-        if grace_group is not None and grace_group.accepting_late_prompts:
-            if admission.is_raw_voice:
-                self._append_to_group(provisional_key, grace_group, admission)
-                grace_group.force_dispatch = True
-                self._wake_ingress_group(grace_group)
-                return
-            if self._admission_is_known_media_prompt(admission):
-                self._append_to_group(provisional_key, grace_group, admission)
-                self._wake_ingress_group(grace_group)
-                return
-            if not admission.ready_task.done():
-                await asyncio.sleep(0)
-            grace_group = self._ingress_grace_groups.get(provisional_key)
-            if (
-                grace_group is not None
-                and grace_group.accepting_late_prompts
-                and self._admission_is_ready_media_prompt(admission)
-            ):
-                self._append_to_group(provisional_key, grace_group, admission)
-                self._wake_ingress_group(grace_group)
-                return
-            if grace_group is not None and grace_group.accepting_late_prompts:
-                self._seal_grace_group(provisional_key)
+        if await self._try_append_to_grace_group(provisional_key, admission):
+            return
 
         if self._try_append_to_open_group_or_seal(provisional_key, admission):
             return
@@ -254,6 +235,34 @@ class TurnIngressCoalescingGate:
             return
 
         self._append_to_open_prompt_group(provisional_key, admission)
+
+    async def _try_append_to_grace_group(
+        self,
+        provisional_key: IngressProvisionalKey,
+        admission: _ReadyIngressAdmission,
+    ) -> bool:
+        grace_group = self._ingress_grace_groups.get(provisional_key)
+        if grace_group is None or not grace_group.accepting_late_prompts:
+            return False
+        if admission.is_raw_voice or self._admission_is_known_media_prompt(admission):
+            self._append_to_group(provisional_key, grace_group, admission)
+            if admission.is_raw_voice:
+                grace_group.force_dispatch = True
+            self._wake_ingress_group(grace_group)
+            return True
+        if not admission.ready_task.done():
+            await asyncio.sleep(0)
+        if await self._cancel_if_shutting_down(admission):
+            return True
+        grace_group = self._ingress_grace_groups.get(provisional_key)
+        if grace_group is None or not grace_group.accepting_late_prompts:
+            return False
+        if self._admission_is_ready_media_prompt(admission):
+            self._append_to_group(provisional_key, grace_group, admission)
+            self._wake_ingress_group(grace_group)
+            return True
+        self._seal_grace_group(provisional_key)
+        return False
 
     def _try_append_to_open_group_or_seal(
         self,
@@ -485,16 +494,18 @@ class TurnIngressCoalescingGate:
         groups: list[_IngressPromptGroup],
     ) -> None:
         predecessor_tasks = {task for group in groups for task in group.predecessor_drain_tasks if not task.done()}
-        if not predecessor_tasks:
-            return
         current_task = asyncio.current_task()
-        tasks_to_wait = [
-            group.drain_task
-            for group in self._ingress_draining_groups.get(provisional_key, ())
-            if group.drain_task in predecessor_tasks
-            and group.drain_task is not current_task
-            and self._predecessor_group_blocks_barrier(group)
-        ]
+        tasks_to_wait: list[asyncio.Task[None]] = []
+        for group in self._ingress_draining_groups.get(provisional_key, ()):
+            drain_task = group.drain_task
+            if drain_task is None or drain_task is current_task:
+                continue
+            blocks_as_predecessor = drain_task in predecessor_tasks and self._predecessor_group_blocks_barrier(group)
+            blocks_as_sealed_group = any(candidate is group for candidate in groups) and self._admissions_block_barrier(
+                self._unclaimed_group_admissions(group),
+            )
+            if blocks_as_predecessor or blocks_as_sealed_group:
+                tasks_to_wait.append(drain_task)
         if not tasks_to_wait:
             return
         await asyncio.gather(*tasks_to_wait, return_exceptions=True)
@@ -530,7 +541,10 @@ class TurnIngressCoalescingGate:
         provisional_key: IngressProvisionalKey,
         admission: _ReadyIngressAdmission,
     ) -> bool:
-        if not await self._admission_is_voice_prompt(admission):
+        is_voice_prompt = await self._admission_is_voice_prompt(admission)
+        if await self._cancel_if_shutting_down(admission):
+            return True
+        if not is_voice_prompt:
             return False
         draining_groups = self._ingress_draining_groups.get(provisional_key)
         if not draining_groups:
@@ -707,6 +721,12 @@ class TurnIngressCoalescingGate:
                 cancelled_unresolved = bool(self._cancel_unresolved_admission(admission)) or cancelled_unresolved
             self._wake_ingress_group(group)
         return cancelled_unresolved
+
+    async def _cancel_if_shutting_down(self, admission: _ReadyIngressAdmission) -> bool:
+        if not self._is_shutting_down():
+            return False
+        await self._cancel_late_shutdown_admission(admission)
+        return True
 
     @property
     def cancelled_unresolved_admission_generation(self) -> int:
@@ -1281,13 +1301,17 @@ class TurnIngressCoalescingGate:
                 ready_admissions.append(admission)
         return ready_admissions
 
-    @staticmethod
-    def _group_has_barrier_admission(group: _IngressPromptGroup) -> bool:
-        return any(admission.is_barrier for admission in group.items)
-
     @classmethod
     def _predecessor_group_blocks_barrier(cls, group: _IngressPromptGroup) -> bool:
-        return cls._group_has_barrier_admission(group) or not cls._admissions_have_pending_work(group.items)
+        return cls._admissions_block_barrier(group.items)
+
+    @classmethod
+    def _admissions_block_barrier(cls, admissions: list[_ReadyIngressAdmission]) -> bool:
+        if not admissions:
+            return False
+        return any(
+            admission.is_barrier or admission.may_resolve_barrier for admission in admissions
+        ) or not cls._admissions_have_pending_work(admissions)
 
     @staticmethod
     def _admission_has_pending_work(admission: _ReadyIngressAdmission) -> bool:

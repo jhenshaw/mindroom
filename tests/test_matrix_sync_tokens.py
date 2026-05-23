@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -30,6 +30,8 @@ from tests.conftest import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.turn_ingress_coalescing import _ReadyIngressAdmission
 
 
 def _config(tmp_path: Path) -> Config:
@@ -541,6 +543,64 @@ async def test_late_ready_ingress_after_shutdown_checkpoint_clears_saved_token(t
     assert bot._sync_trust_state is SyncTrustState.UNCERTAIN
     assert bot._sync_checkpoint is None
     assert bot.client.next_batch is None
+
+
+@pytest.mark.asyncio
+async def test_admission_yielding_during_shutdown_clears_saved_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An admission that resumes after shutdown drain must still poison sync continuity."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.client.next_batch = "s_after_event"
+    bot._sync_trust_state = SyncTrustState.CERTIFIED
+    bot._sync_checkpoint = SyncCheckpoint("s_after_event")
+    save_sync_token(tmp_path, bot.agent_name, "s_after_event")
+    classification_started = asyncio.Event()
+    release_classification = asyncio.Event()
+    release_ready_task = asyncio.Event()
+    original_admission_is_voice_prompt = bot._turn_ingress_gate._admission_is_voice_prompt
+
+    async def delayed_admission_is_voice_prompt(admission: object) -> bool:
+        classification_started.set()
+        await release_classification.wait()
+        return await original_admission_is_voice_prompt(cast("_ReadyIngressAdmission", admission))
+
+    async def unresolved_ready_result() -> None:
+        await release_ready_task.wait()
+
+    monkeypatch.setattr(bot._turn_ingress_gate, "_admission_is_voice_prompt", delayed_admission_is_voice_prompt)
+    ready_task = asyncio.create_task(unresolved_ready_result())
+    admission_task = asyncio.create_task(
+        bot._turn_ingress_gate.admit_ready_task(
+            IngressProvisionalKey("!room:localhost", "@user:localhost"),
+            ready_task=ready_task,
+            source_kind="message",
+            barrier=False,
+        ),
+    )
+
+    try:
+        await asyncio.wait_for(classification_started.wait(), timeout=1.0)
+        await bot.prepare_for_sync_shutdown()
+
+        release_classification.set()
+        await asyncio.wait_for(admission_task, timeout=1.0)
+
+        assert load_sync_token_record(tmp_path, bot.agent_name) is None
+        assert bot._sync_trust_state is SyncTrustState.UNCERTAIN
+        assert bot._sync_checkpoint is None
+        assert bot.client.next_batch is None
+    finally:
+        release_classification.set()
+        release_ready_task.set()
+        if not admission_task.done():
+            admission_task.cancel()
+        await asyncio.gather(admission_task, return_exceptions=True)
+        if not ready_task.done():
+            ready_task.cancel()
+        await asyncio.gather(ready_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio

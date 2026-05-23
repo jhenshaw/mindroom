@@ -433,6 +433,7 @@ async def _admit_prompt_result(
     result: PromptReadyIngressResult | BarrierReadyIngressResult | DropReadyIngressResult,
     *,
     barrier: bool = False,
+    may_resolve_barrier: bool = False,
     release: asyncio.Event | None = None,
     error: BaseException | None = None,
 ) -> None:
@@ -446,6 +447,7 @@ async def _admit_prompt_result(
         ready_task=_ready_task(result, release=release, error=error),
         source_kind=source_kind,
         barrier=barrier,
+        may_resolve_barrier=may_resolve_barrier,
     )
 
 
@@ -1656,6 +1658,50 @@ async def test_known_barriers_preserve_receive_order_when_older_barrier_is_delay
                     await task
 
     assert [batch.source_event_ids for batch in batches] == [["$command1"], ["$command2"]]
+
+
+@pytest.mark.asyncio
+async def test_known_barrier_waits_for_older_unresolved_dynamic_barrier() -> None:
+    """A known barrier must not pass older work that may resolve into a barrier."""
+    room = _threaded_room()
+    ingress_gate, coalescing_gate, batches = _install_direct_ingress_capture_gates(debounce_seconds=0.0)
+    provisional_key = IngressProvisionalKey(room.room_id, "@user:example.com")
+    key = (room.room_id, "$thread", "@user:example.com")
+    release_dynamic_barrier = asyncio.Event()
+
+    await _admit_prompt_result(
+        ingress_gate,
+        provisional_key,
+        _barrier_ready_result(room=room, key=key, event_id="$dynamic-command", order=1),
+        may_resolve_barrier=True,
+        release=release_dynamic_barrier,
+    )
+    known_barrier_task = asyncio.create_task(
+        _admit_prompt_result(
+            ingress_gate,
+            provisional_key,
+            _barrier_ready_result(room=room, key=key, event_id="$known-command", order=2),
+            barrier=True,
+        ),
+    )
+    try:
+        await asyncio.sleep(0.02)
+        await coalescing_gate.drain_all()
+
+        assert batches == []
+        assert not known_barrier_task.done()
+
+        release_dynamic_barrier.set()
+        await asyncio.wait_for(known_barrier_task, timeout=1.0)
+        await _drain_direct_ingress(ingress_gate, coalescing_gate)
+    finally:
+        release_dynamic_barrier.set()
+        if not known_barrier_task.done():
+            known_barrier_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await known_barrier_task
+
+    assert [batch.source_event_ids for batch in batches] == [["$dynamic-command"], ["$known-command"]]
 
 
 @pytest.mark.asyncio
