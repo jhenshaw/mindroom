@@ -244,9 +244,9 @@ class TurnIngressCoalescingGate:
         grace_group = self._ingress_grace_groups.get(provisional_key)
         if grace_group is None or not grace_group.accepting_late_prompts:
             return False
-        if admission.is_raw_voice or self._admission_is_known_media_prompt(admission):
+        if self._admission_is_known_voice_prompt(admission) or self._admission_is_known_media_prompt(admission):
             self._append_to_group(provisional_key, grace_group, admission)
-            if admission.is_raw_voice:
+            if self._admission_is_known_voice_prompt(admission):
                 grace_group.force_dispatch = True
             self._wake_ingress_group(grace_group)
             return True
@@ -850,6 +850,14 @@ class TurnIngressCoalescingGate:
     def _admission_is_known_media_prompt(admission: _ReadyIngressAdmission) -> bool:
         return admission.source_kind in {IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND}
 
+    @staticmethod
+    def _admission_is_known_voice_prompt(admission: _ReadyIngressAdmission) -> bool:
+        return (
+            admission.is_raw_voice
+            or admission.source_kind == VOICE_SOURCE_KIND
+            or admission.coalescing_class == VOICE_COALESCING_CLASS
+        )
+
     def _admission_is_ready_media_prompt(self, admission: _ReadyIngressAdmission) -> bool:
         if admission.source_kind in {IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND}:
             return True
@@ -869,11 +877,7 @@ class TurnIngressCoalescingGate:
         )
 
     def _admission_is_completed_voice_prompt(self, admission: _ReadyIngressAdmission) -> bool:
-        if (
-            admission.is_raw_voice
-            or admission.source_kind == VOICE_SOURCE_KIND
-            or admission.coalescing_class == VOICE_COALESCING_CLASS
-        ):
+        if self._admission_is_known_voice_prompt(admission):
             return True
         if not admission.ready_task.done() or admission.ready_task.cancelled():
             return False
@@ -884,11 +888,7 @@ class TurnIngressCoalescingGate:
         return self._ready_result_is_voice_prompt(result)
 
     async def _admission_is_voice_prompt(self, admission: _ReadyIngressAdmission) -> bool:
-        if (
-            admission.is_raw_voice
-            or admission.source_kind == VOICE_SOURCE_KIND
-            or admission.coalescing_class == VOICE_COALESCING_CLASS
-        ):
+        if self._admission_is_known_voice_prompt(admission):
             return True
         if not admission.ready_task.done():
             await asyncio.sleep(0)

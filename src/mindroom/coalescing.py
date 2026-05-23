@@ -89,6 +89,7 @@ class _QueuedEvent:
 class _QueuedSealedBatch:
     pending_events: list[PendingEvent]
     dispatch_together: bool
+    retarget_with_room_key: bool
 
 
 type _QueuedWork = _QueuedEvent | _QueuedSealedBatch
@@ -274,7 +275,7 @@ class CoalescingGate:
 
     @staticmethod
     def _queued_work_stays_on_room_key_after_retarget(work: _QueuedWork) -> bool:
-        return isinstance(work, _QueuedSealedBatch) and not work.dispatch_together
+        return isinstance(work, _QueuedSealedBatch) and not work.retarget_with_room_key
 
     def _split_room_key_retarget_work(
         self,
@@ -498,6 +499,10 @@ class CoalescingGate:
             or key[1] is not None
             or any(cls._pending_event_forces_room_scope_sealed_batch(pending_event) for pending_event in pending_events)
         )
+
+    @classmethod
+    def _sealed_batch_should_follow_room_key_retarget(cls, pending_events: list[PendingEvent]) -> bool:
+        return any(cls._pending_event_forces_room_scope_sealed_batch(pending_event) for pending_event in pending_events)
 
     @classmethod
     def _claim_front_sealed_events(cls, gate: _GateEntry) -> list[PendingEvent]:
@@ -733,6 +738,7 @@ class CoalescingGate:
             _QueuedSealedBatch(
                 pending_events=sealed_events,
                 dispatch_together=self._sealed_batch_should_dispatch_together(key, sealed_events),
+                retarget_with_room_key=self._sealed_batch_should_follow_room_key_retarget(sealed_events),
             ),
         )
         self._schedule_drain(key, gate)

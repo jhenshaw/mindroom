@@ -202,6 +202,62 @@ async def test_sealed_room_level_text_split_survives_mid_dispatch_retarget() -> 
 
 
 @pytest.mark.asyncio
+async def test_single_sealed_room_text_root_survives_mid_dispatch_retarget() -> None:
+    """A single room-root text batch queued behind an in-flight root must stay room-scoped."""
+    batches: list[CoalescedBatch] = []
+    dispatch_started = asyncio.Event()
+    release_dispatch = asyncio.Event()
+    key = ("!room:localhost", None, "@user:localhost")
+    retargeted_key = ("!room:localhost", "$first:localhost", "@user:localhost")
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+        if batch.source_event_ids == ["$first:localhost"]:
+            dispatch_started.set()
+            await release_dispatch.wait()
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    room = nio.MatrixRoom("!room:localhost", "@mindroom:localhost")
+
+    await gate.enqueue_sealed_batch(
+        key,
+        [
+            PendingEvent(
+                event=_text_event("$first:localhost", "first", 1_000_000),
+                room=room,
+                source_kind="message",
+            ),
+        ],
+    )
+    await dispatch_started.wait()
+    await gate.enqueue_sealed_batch(
+        key,
+        [
+            PendingEvent(
+                event=_text_event("$second:localhost", "second", 1_000_600),
+                room=room,
+                source_kind="message",
+            ),
+        ],
+    )
+
+    gate.retarget(key, retargeted_key)
+    release_dispatch.set()
+    await gate.drain_all()
+
+    assert [batch.source_event_ids for batch in batches] == [
+        ["$first:localhost"],
+        ["$second:localhost"],
+    ]
+    assert [batch.coalescing_key for batch in batches] == [key, key]
+
+
+@pytest.mark.asyncio
 async def test_sealed_room_level_text_roots_split_even_when_later_root_has_media() -> None:
     """A late media item may join one room root, but must not merge independent room text roots."""
     batches: list[CoalescedBatch] = []
