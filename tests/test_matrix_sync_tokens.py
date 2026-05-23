@@ -18,7 +18,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.matrix.sync_certification import SyncCheckpoint, SyncTrustState
 from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_token_record, save_sync_token
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.turn_ingress_coalescing import IngressProvisionalKey
+from mindroom.turn_ingress_coalescing import IngressProvisionalKey, PromptReadyIngressResult
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -488,6 +488,55 @@ async def test_late_unresolved_ingress_after_shutdown_checkpoint_clears_saved_to
         await asyncio.gather(late_ready_task, return_exceptions=True)
 
     assert late_ready_task.cancelled()
+    assert load_sync_token_record(tmp_path, bot.agent_name) is None
+    assert bot._sync_trust_state is SyncTrustState.UNCERTAIN
+    assert bot._sync_checkpoint is None
+    assert bot.client.next_batch is None
+
+
+@pytest.mark.asyncio
+async def test_late_ready_ingress_after_shutdown_checkpoint_clears_saved_token(tmp_path: Path) -> None:
+    """Completed callback admission after checkpoint flush must not enter a certified pipeline."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.client.next_batch = "s_after_event"
+    bot._sync_trust_state = SyncTrustState.CERTIFIED
+    bot._sync_checkpoint = SyncCheckpoint("s_after_event")
+    bot._coalescing_gate.drain_all = AsyncMock()
+    bot._coalescing_gate.enqueue_sealed_batch = AsyncMock()
+
+    await bot.prepare_for_sync_shutdown()
+
+    assert load_sync_token_record(tmp_path, bot.agent_name) is not None
+
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!room:localhost"
+    event = MagicMock()
+    event.event_id = "$late"
+    pending_event = MagicMock()
+    pending_event.event = event
+    ready_task = asyncio.create_task(
+        asyncio.sleep(
+            0,
+            result=PromptReadyIngressResult(
+                pending_event=pending_event,
+                key=("!room:localhost", "$thread", "@user:localhost"),
+                preliminary_key=("!room:localhost", "$thread", "@user:localhost"),
+                received_order=1,
+                received_wall_time=1.0,
+            ),
+        ),
+    )
+    await ready_task
+
+    await bot._turn_ingress_gate.admit_ready_task(
+        IngressProvisionalKey("!room:localhost", "@user:localhost"),
+        ready_task=ready_task,
+        source_kind="message",
+        barrier=False,
+    )
+
+    bot._coalescing_gate.enqueue_sealed_batch.assert_not_called()
     assert load_sync_token_record(tmp_path, bot.agent_name) is None
     assert bot._sync_trust_state is SyncTrustState.UNCERTAIN
     assert bot._sync_checkpoint is None

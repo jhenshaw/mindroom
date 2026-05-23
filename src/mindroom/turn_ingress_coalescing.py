@@ -186,7 +186,8 @@ class TurnIngressCoalescingGate:
             coalescing_class=coalescing_class,
             is_barrier=barrier,
         )
-        if self._is_shutting_down() and await self._cancel_late_shutdown_admission(admission):
+        if self._is_shutting_down():
+            await self._cancel_late_shutdown_admission(admission)
             return
         if barrier:
             if await self._dispatch_barrier_after_accepting_groups(provisional_key, admission):
@@ -208,7 +209,8 @@ class TurnIngressCoalescingGate:
             preliminary_key_task=item.preliminary_key_task,
             owned_tasks=item.owned_tasks,
         )
-        if self._is_shutting_down() and await self._cancel_late_shutdown_admission(admission):
+        if self._is_shutting_down():
+            await self._cancel_late_shutdown_admission(admission)
             return
         await self._admit_prompt_admission(provisional_key, admission)
 
@@ -711,12 +713,16 @@ class TurnIngressCoalescingGate:
         """Return whether shutdown has cancelled any unresolved admission."""
         return self._cancelled_unresolved_admissions
 
-    async def _cancel_late_shutdown_admission(self, admission: _ReadyIngressAdmission) -> bool:
+    async def _cancel_late_shutdown_admission(self, admission: _ReadyIngressAdmission) -> None:
+        self._mark_unresolved_admission_cancelled()
+        close_pending_event_metadata(self._completed_admission_pending_events(admission))
         cancelled_tasks = self._cancel_unresolved_admission(admission)
-        if not cancelled_tasks:
-            return False
         await asyncio.gather(*cancelled_tasks, return_exceptions=True)
-        return True
+
+    def _mark_unresolved_admission_cancelled(self) -> None:
+        self._cancelled_unresolved_admissions = True
+        if self._on_unresolved_admission_cancelled is not None:
+            self._on_unresolved_admission_cancelled()
 
     def _cancel_unresolved_admission(self, admission: _ReadyIngressAdmission) -> tuple[asyncio.Task[Any], ...]:
         self._close_ready_metadata_when_cancelling_preliminary(admission)
@@ -732,10 +738,23 @@ class TurnIngressCoalescingGate:
                 task.cancel()
                 cancelled_tasks.append(task)
         if cancelled_tasks:
-            self._cancelled_unresolved_admissions = True
-            if self._on_unresolved_admission_cancelled is not None:
-                self._on_unresolved_admission_cancelled()
+            self._mark_unresolved_admission_cancelled()
         return tuple(cancelled_tasks)
+
+    def _completed_admission_pending_events(self, admission: _ReadyIngressAdmission) -> list[PendingEvent]:
+        if not admission.ready_task.done() or admission.ready_task.cancelled():
+            return []
+        try:
+            result = admission.ready_task.result()
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except self.ReadyTaskError as error:
+            return [error.pending_event]
+        except BaseException:
+            return []
+        if isinstance(result, (PromptReadyIngressResult, BarrierReadyIngressResult)):
+            return [result.pending_event]
+        return []
 
     def _close_ready_metadata_when_cancelling_preliminary(self, admission: _ReadyIngressAdmission) -> None:
         if (
