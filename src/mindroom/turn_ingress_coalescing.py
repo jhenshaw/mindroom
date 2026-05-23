@@ -169,7 +169,9 @@ class TurnIngressCoalescingGate:
             coalescing_class=coalescing_class,
         )
         if barrier:
-            self._seal_groups_for_known_barrier(provisional_key)
+            if await self._dispatch_barrier_after_latest_accepting_group(provisional_key, admission):
+                return
+            await self._wait_for_barrier_predecessor_groups(self._groups_for_provisional_key(provisional_key))
             await self._forward_independent_ready_admission(admission)
             return
         await self._admit_prompt_admission(provisional_key, admission)
@@ -267,6 +269,59 @@ class TurnIngressCoalescingGate:
         self._ensure_ingress_drain_task(provisional_key, group)
         self._wake_ingress_group(group)
 
+    def _groups_for_provisional_key(self, provisional_key: IngressProvisionalKey) -> tuple[_IngressPromptGroup, ...]:
+        groups = [
+            group
+            for group in (
+                self._ingress_open_groups.get(provisional_key),
+                self._ingress_grace_groups.get(provisional_key),
+            )
+            if group is not None
+        ]
+        groups.extend(self._ingress_draining_groups.get(provisional_key, ()))
+        groups.extend(self._ingress_claimed_voice_groups.get(provisional_key, ()))
+
+        unique_groups: list[_IngressPromptGroup] = []
+        seen_ids: set[int] = set()
+        for group in groups:
+            if id(group) in seen_ids:
+                continue
+            seen_ids.add(id(group))
+            unique_groups.append(group)
+        return tuple(unique_groups)
+
+    async def _wait_for_barrier_predecessor_groups(self, groups: tuple[_IngressPromptGroup, ...]) -> None:
+        current_task = asyncio.current_task()
+        predecessor_tasks = [
+            group.drain_task
+            for group in groups
+            if group.drain_task is not None and not group.drain_task.done() and group.drain_task is not current_task
+        ]
+        if not predecessor_tasks:
+            return
+        await asyncio.gather(*predecessor_tasks, return_exceptions=True)
+        self._collect_finished_ingress_drain_tasks()
+        self._raise_ingress_drain_errors()
+
+    async def _dispatch_barrier_after_latest_accepting_group(
+        self,
+        provisional_key: IngressProvisionalKey,
+        admission: _ReadyIngressAdmission,
+    ) -> bool:
+        groups = [group for group in self._groups_for_provisional_key(provisional_key) if group.accepting_late_prompts]
+        if not groups:
+            return False
+        target_group = groups[-1]
+        self._seal_group_for_barrier(provisional_key, target_group)
+        ordered_items = sorted(target_group.items, key=lambda item: item.received_order)
+        ready_prefix_length = self._ready_prefix_length(ordered_items)
+        ready_prefix = ordered_items[:ready_prefix_length]
+        target_group.items = ordered_items[ready_prefix_length:]
+        if ready_prefix:
+            await self._dispatch_fixed_ingress_admissions(ready_prefix)
+        await self._forward_independent_ready_admission(admission)
+        return True
+
     def _append_to_latest_claimed_voice_group(
         self,
         provisional_key: IngressProvisionalKey,
@@ -308,20 +363,18 @@ class TurnIngressCoalescingGate:
             return True
         return False
 
-    def _seal_groups_for_known_barrier(self, provisional_key: IngressProvisionalKey) -> None:
-        self._seal_open_group(provisional_key)
-        self._seal_grace_group(provisional_key)
-        for group in self._ingress_claimed_voice_groups.get(provisional_key, ()):
-            group.accepting_late_prompts = False
-
-    def _seal_open_group(self, provisional_key: IngressProvisionalKey) -> None:
-        group = self._ingress_open_groups.get(provisional_key)
-        if group is None:
-            return
+    def _seal_group_for_barrier(
+        self,
+        provisional_key: IngressProvisionalKey,
+        group: _IngressPromptGroup,
+    ) -> None:
         group.accepting_late_prompts = False
         group.force_dispatch = True
         group.deadline = time.monotonic()
-        self._ingress_open_groups.pop(provisional_key, None)
+        if self._ingress_open_groups.get(provisional_key) is group:
+            self._ingress_open_groups.pop(provisional_key, None)
+        if self._ingress_grace_groups.get(provisional_key) is group:
+            self._ingress_grace_groups.pop(provisional_key, None)
         self._ensure_ingress_drain_task(provisional_key, group)
         self._wake_ingress_group(group)
 
@@ -645,13 +698,32 @@ class TurnIngressCoalescingGate:
             raise
         except self.ReadyTaskError as error:
             close_pending_event_metadata([error.pending_event])
+            logger.warning(
+                "Turn ingress ready task failed",
+                event_id=error.pending_event.event.event_id,
+                source_kind=error.pending_event.source_kind,
+                received_order=admission.received_order,
+                error=repr(error.cause),
+                exc_info=(type(error.cause), error.cause, error.cause.__traceback__),
+            )
             result = None
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as error:
             current_task = asyncio.current_task()
             if current_task is not None and current_task.cancelling():
                 raise
+            logger.warning(
+                "Turn ingress ready task was cancelled",
+                received_order=admission.received_order,
+                exc_info=(type(error), error, error.__traceback__),
+            )
             result = None
-        except BaseException:
+        except BaseException as error:
+            logger.warning(
+                "Turn ingress ready task failed",
+                received_order=admission.received_order,
+                error=repr(error),
+                exc_info=(type(error), error, error.__traceback__),
+            )
             result = None
         else:
             result = self._ready_result_with_admission_metadata(
@@ -746,6 +818,7 @@ class TurnIngressCoalescingGate:
             if self._admissions_have_pending_work(ordered_items):
                 await self._wait_for_ingress_admission_progress(ordered_items, group=group)
                 continue
+            group.accepting_late_prompts = False
             processed_admission_ids.update(id(admission) for admission in ordered_items)
             await self._dispatch_prompt_admissions(ordered_items)
             return

@@ -1139,6 +1139,114 @@ async def test_receive_time_retarget_closes_stripped_queued_notice_metadata() ->
 
 
 @pytest.mark.asyncio
+async def test_late_prompt_during_claimed_voice_dispatch_starts_next_group() -> None:
+    """A prompt received after a voice group is sealed must not append into a closed snapshot."""
+    room = _threaded_room()
+    ingress_gate, coalescing_gate, batches = _install_direct_ingress_capture_gates(debounce_seconds=0.0)
+    provisional_key = IngressProvisionalKey(room.room_id, "@user:example.com")
+    preliminary_key = (room.room_id, "$preliminary", "@user:example.com")
+    final_key = (room.room_id, "$final", "@user:example.com")
+    original_enqueue_sealed_batch = coalescing_gate.enqueue_sealed_batch
+    first_enqueue_started = asyncio.Event()
+    release_first_enqueue = asyncio.Event()
+
+    async def enqueue_sealed_batch(
+        key: tuple[str, str | None, str],
+        pending_events: list[PendingEvent],
+    ) -> None:
+        if not first_enqueue_started.is_set():
+            first_enqueue_started.set()
+            await release_first_enqueue.wait()
+        await original_enqueue_sealed_batch(key, pending_events)
+
+    coalescing_gate.enqueue_sealed_batch = AsyncMock(side_effect=enqueue_sealed_batch)
+
+    await ingress_gate.admit_raw_voice(
+        provisional_key,
+        _raw_voice_ingress_item(
+            room=room,
+            event_id="$voice",
+            preliminary_key=preliminary_key,
+            ready_task=_ready_task(
+                _prompt_ready_result(
+                    room=room,
+                    key=final_key,
+                    preliminary_key=preliminary_key,
+                    event_id="$voice",
+                    body="voice final",
+                    order=1,
+                    source_kind=VOICE_SOURCE_KIND,
+                    coalescing_class=VOICE_COALESCING_CLASS,
+                ),
+            ),
+            order=1,
+        ),
+    )
+    await asyncio.wait_for(first_enqueue_started.wait(), timeout=1.0)
+    await _admit_prompt_result(
+        ingress_gate,
+        provisional_key,
+        _prompt_ready_result(
+            room=room,
+            key=preliminary_key,
+            preliminary_key=preliminary_key,
+            event_id="$typed",
+            body="late text",
+            order=2,
+        ),
+    )
+
+    release_first_enqueue.set()
+    await _drain_direct_ingress(ingress_gate, coalescing_gate)
+
+    assert [batch.source_event_ids for batch in batches] == [["$voice"], ["$typed"]]
+
+
+@pytest.mark.asyncio
+async def test_known_barrier_waits_for_older_prompt_group_to_enqueue() -> None:
+    """A command/barrier must not overtake an earlier prompt in the same receive key."""
+    room = _threaded_room()
+    ingress_gate, coalescing_gate, _batches = _install_direct_ingress_capture_gates(debounce_seconds=0.0)
+    provisional_key = IngressProvisionalKey(room.room_id, "@user:example.com")
+    key = (room.room_id, "$thread", "@user:example.com")
+    enqueue_order: list[list[str]] = []
+    original_enqueue_sealed_batch = coalescing_gate.enqueue_sealed_batch
+    original_enqueue = coalescing_gate.enqueue
+
+    async def enqueue_sealed_batch(
+        sealed_key: tuple[str, str | None, str],
+        pending_events: list[PendingEvent],
+    ) -> None:
+        enqueue_order.append([pending_event.event.event_id for pending_event in pending_events])
+        await original_enqueue_sealed_batch(sealed_key, pending_events)
+
+    async def enqueue(
+        barrier_key: tuple[str, str | None, str],
+        pending_event: PendingEvent,
+    ) -> None:
+        enqueue_order.append([pending_event.event.event_id])
+        await original_enqueue(barrier_key, pending_event)
+
+    coalescing_gate.enqueue_sealed_batch = AsyncMock(side_effect=enqueue_sealed_batch)
+    coalescing_gate.enqueue = AsyncMock(side_effect=enqueue)
+
+    await _admit_prompt_result(
+        ingress_gate,
+        provisional_key,
+        _prompt_ready_result(room=room, key=key, event_id="$text", body="text", order=1),
+    )
+    await _admit_prompt_result(
+        ingress_gate,
+        provisional_key,
+        _barrier_ready_result(room=room, key=key, event_id="$command", order=2),
+        barrier=True,
+    )
+    await _drain_direct_ingress(ingress_gate, coalescing_gate)
+
+    assert enqueue_order == [["$text"], ["$command"]]
+
+
+@pytest.mark.asyncio
 async def test_receive_time_coordinator_partitions_same_room_requester_by_preliminary_thread() -> None:
     """A voice in one preliminary thread must not retarget text from another preliminary thread."""
     room = _threaded_room()
@@ -1826,22 +1934,24 @@ async def test_receive_time_text_ready_failure_closes_notice_and_later_text_disp
         ),
     )
 
-    await ingress_gate.admit_ready_task(
-        provisional_key,
-        ready_task=_ready_task(
-            None,
-            error=TurnIngressCoalescingGate.ReadyTaskError(failed_pending_event, VoiceNormalizationTestError()),
-        ),
-        barrier=False,
-    )
-    await _admit_prompt_result(
-        ingress_gate,
-        provisional_key,
-        _prompt_ready_result(room=room, key=key, event_id="$later", body="later text", order=2),
-    )
-    await _drain_direct_ingress(ingress_gate, coalescing_gate)
+    with patch("mindroom.turn_ingress_coalescing.logger.warning") as log_warning:
+        await ingress_gate.admit_ready_task(
+            provisional_key,
+            ready_task=_ready_task(
+                None,
+                error=TurnIngressCoalescingGate.ReadyTaskError(failed_pending_event, VoiceNormalizationTestError()),
+            ),
+            barrier=False,
+        )
+        await _admit_prompt_result(
+            ingress_gate,
+            provisional_key,
+            _prompt_ready_result(room=room, key=key, event_id="$later", body="later text", order=2),
+        )
+        await _drain_direct_ingress(ingress_gate, coalescing_gate)
 
     reservation.cancel.assert_called_once_with()
+    assert any(call.args == ("Turn ingress ready task failed",) for call in log_warning.call_args_list)
     assert [batch.source_event_ids for batch in batches] == [["$later"]]
 
 
