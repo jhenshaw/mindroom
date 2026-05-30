@@ -1,5 +1,6 @@
 """Persisted history compaction helpers."""
 
+from mindroom.history import agno_team_patch
 from mindroom.history.compaction import (
     normalize_compaction_budget_tokens,
 )
@@ -8,9 +9,7 @@ from mindroom.history.compaction_provider_request import (
     compute_prompt_token_breakdown,
     team_tool_definition_payloads_for_logging,
 )
-from mindroom.history.manual import (
-    request_compaction_before_next_reply,
-)
+from mindroom.history.manual import request_compaction_before_next_reply
 from mindroom.history.policy import (
     context_budget_after_reserve,
     manual_compaction_unavailable_message,
@@ -29,15 +28,19 @@ from mindroom.history.runtime import (
     note_prepared_history_timing,
     open_bound_scope_session_context,
     open_resolved_scope_session_context,
+    open_scope_session_context,
     prepare_bound_scope_history,
     prepare_history_for_run,
     prepare_scope_history,
     resolve_bound_team_scope_context,
 )
 from mindroom.history.storage import (
+    add_pending_force_compaction_scope,
+    has_pending_force_compaction_scope,
     read_scope_seen_event_ids,
-    strip_transient_enrichment_from_session,
+    read_scope_state,
     update_scope_seen_event_ids,
+    write_scope_state,
 )
 from mindroom.history.types import (
     CompactionDecision,
@@ -48,10 +51,17 @@ from mindroom.history.types import (
     CompactionLifecycleSuccess,
     CompactionOutcome,
     CompactionReplyOutcome,
+    HistoryPolicy,
     HistoryScope,
+    HistoryScopeMetadata,
+    HistoryScopeState,
     PreparedHistoryState,
+    ResolvedHistoryExecutionPlan,
+    ResolvedHistorySettings,
     ResolvedReplayPlan,
 )
+
+agno_team_patch.apply_patch()
 
 __all__ = [
     "CompactionDecision",
@@ -62,11 +72,17 @@ __all__ = [
     "CompactionLifecycleSuccess",
     "CompactionOutcome",
     "CompactionReplyOutcome",
+    "HistoryPolicy",
     "HistoryScope",
+    "HistoryScopeMetadata",
+    "HistoryScopeState",
     "PreparedHistoryState",
     "PreparedScopeHistory",
+    "ResolvedHistoryExecutionPlan",
+    "ResolvedHistorySettings",
     "ResolvedReplayPlan",
     "ScopeSessionContext",
+    "add_pending_force_compaction_scope",
     "agent_tool_definition_payloads_for_logging",
     "apply_replay_plan",
     "close_agent_runtime_state_dbs",
@@ -77,19 +93,22 @@ __all__ = [
     "estimate_preparation_static_tokens",
     "estimate_preparation_static_tokens_for_team",
     "finalize_history_preparation",
+    "has_pending_force_compaction_scope",
     "manual_compaction_unavailable_message",
     "normalize_compaction_budget_tokens",
     "note_prepared_history_timing",
     "open_bound_scope_session_context",
     "open_resolved_scope_session_context",
+    "open_scope_session_context",
     "prepare_bound_scope_history",
     "prepare_history_for_run",
     "prepare_scope_history",
     "read_scope_seen_event_ids",
+    "read_scope_state",
     "request_compaction_before_next_reply",
     "resolve_bound_team_scope_context",
     "resolve_history_execution_plan",
-    "strip_transient_enrichment_from_session",
     "team_tool_definition_payloads_for_logging",
     "update_scope_seen_event_ids",
+    "write_scope_state",
 ]

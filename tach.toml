@@ -113,7 +113,10 @@ visibility = [
 
 [[modules]]
 path = "mindroom.agent_storage"
-depends_on = ["mindroom.runtime_resolution"]
+depends_on = [
+    "mindroom.constants",
+    "mindroom.runtime_resolution",
+]
 visibility = [
     "mindroom.agents",
     "mindroom.conversation_state_writer",
@@ -673,8 +676,17 @@ path = "mindroom.partial_reply_text"
 depends_on = []
 
 [[modules]]
+path = "mindroom.attachment_media"
+depends_on = [
+    "mindroom.attachments",
+    "mindroom.logging_config",
+    "mindroom.timing",
+]
+
+[[modules]]
 path = "mindroom.history"
 depends_on = [
+    "mindroom.history.agno_team_patch",
     "mindroom.history.compaction_provider_request",
     "mindroom.history.compaction",
     "mindroom.history.policy",
@@ -707,6 +719,10 @@ depends_on = [
     "mindroom.history.types",
     "mindroom.token_budget",
 ]
+
+[[modules]]
+path = "mindroom.history.agno_team_patch"
+depends_on = ["mindroom.attachment_media"]
 
 [[modules]]
 path = "mindroom.history.agno_forked_request"
@@ -758,6 +774,7 @@ visibility = [
 path = "mindroom.history.runtime"
 depends_on = [
     "mindroom.agent_storage",
+    "mindroom.constants",
     "mindroom.history.compaction",
     "mindroom.history.compaction_provider_request",
     "mindroom.history.policy",
@@ -2069,6 +2086,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.hooks.sender"
 depends_on = [
+    "mindroom.constants",
     "mindroom.hooks.types",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.mentions",
@@ -2137,6 +2155,7 @@ depends_on = [
     "mindroom.attachment_media",
     "mindroom.attachments",
     "mindroom.coalescing",
+    "mindroom.constants",
     "mindroom.logging_config",
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.event_info",
@@ -2169,6 +2188,7 @@ depends_on = [
     "mindroom.knowledge.availability",
     "mindroom.knowledge.manager",
     "mindroom.knowledge.refresh_scheduler",
+    "mindroom.knowledge.status",
     "mindroom.knowledge.utils",
 ]
 
@@ -2369,6 +2389,7 @@ expose = [
     "KnowledgeResolution",
     "OrchestratorKnowledgeRefreshScheduler",
     "PerBindingKnowledgeRefreshScheduler",
+    "reconcile_knowledge_mode_transition_states",
     "resolve_agent_knowledge_access",
     "StandaloneKnowledgeRefreshScheduler",
 ]
@@ -2561,6 +2582,7 @@ expose = [
     "create_space",
     "ensure_room_directory_visibility",
     "ensure_room_join_rule",
+    "ensure_room_admin_power_levels",
     "ensure_room_name",
     "ensure_thread_tags_power_level",
     "get_joined_rooms",
@@ -2667,6 +2689,7 @@ expose = [
     "ToolInitOverrideError",
     "ToolMetadata",
     "ToolMetadataValidationError",
+    "ToolManagedInitArg",
     "ToolStatus",
     "ToolValidationInfo",
     "apply_authored_overrides",
@@ -2703,6 +2726,7 @@ expose = [
     "ToolInitOverrideError",
     "ToolMetadata",
     "ToolMetadataValidationError",
+    "ToolManagedInitArg",
     "ToolStatus",
     "ToolValidationInfo",
     "apply_authored_overrides",
@@ -2880,6 +2904,7 @@ expose = [
     "estimate_preparation_static_tokens",
     "estimate_preparation_static_tokens_for_team",
     "finalize_history_preparation",
+    "has_pending_force_compaction_scope",
     "manual_compaction_unavailable_message",
     "normalize_compaction_budget_tokens",
     "note_prepared_history_timing",
@@ -2893,7 +2918,6 @@ expose = [
     "read_scope_state",
     "resolve_bound_team_scope_context",
     "resolve_history_execution_plan",
-    "strip_transient_enrichment_from_session",
     "team_tool_definition_payloads_for_logging",
     "update_scope_seen_event_ids",
     "write_scope_state",
