@@ -25,8 +25,19 @@ spec:
   - Ingress
   - Egress
   ingress:
-  # Allow only required service ports from any source (ingress controller / external)
-  - ports:
+  # Allow only ingress-nginx and same-instance pods to reach the public service ports.
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/component: controller
+          app.kubernetes.io/name: ingress-nginx
+    - podSelector:
+        matchLabels:
+          customer: {{ .Values.customer | quote }}
+    ports:
     - port: 8765    # MindRoom runtime (bundled dashboard + API)
     - port: 8008    # synapse HTTP
   egress:
@@ -35,10 +46,27 @@ spec:
     - podSelector:
         matchLabels:
           customer: {{ .Values.customer | quote }}
+        matchExpressions:
+        - key: app
+          operator: In
+          values:
+          - mindroom
+          - synapse
     ports:
     - port: 8008
     - port: 8765
+{{- if eq $workerBackend "kubernetes" }}
+  # Allow the primary runtime to reach dedicated workers.
+  - to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/managed-by: mindroom
+          app.kubernetes.io/name: mindroom-worker
+          customer: {{ .Values.customer | quote }}
+          mindroom.ai/component: worker
+    ports:
     - port: {{ $workerPort }}
+{{- end }}
   # Allow DNS
   - ports:
     - port: 53
