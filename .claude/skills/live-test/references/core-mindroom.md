@@ -164,7 +164,15 @@ This prints ONLY bots that are in rooms, with their credentials and room IDs. Pi
 
 ### Step 2: Login as that bot and invite your test user
 
+Copy `BOT_USERNAME`, `BOT_PASSWORD`, and `ROOM_ID` from one bot entry printed by Step 1.
+Run Step 2 and Step 3 in the same shell so the variables are available.
+
 ```bash
+BOT_USERNAME="<user from scan>"
+BOT_PASSWORD="<pw from scan>"
+ROOM_ID="<room ID from scan>"
+ENCODED_ROOM_ID="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$ROOM_ID")"
+
 BOT_TOKEN=$(curl -sS -X POST 'http://localhost:8008/_matrix/client/v3/login' \
   -H 'Content-Type: application/json' \
   -d "{\"type\":\"m.login.password\",\"identifier\":{\"type\":\"m.id.user\",\"user\":\"$BOT_USERNAME\"},\"password\":\"$BOT_PASSWORD\"}" \
@@ -172,7 +180,7 @@ BOT_TOKEN=$(curl -sS -X POST 'http://localhost:8008/_matrix/client/v3/login' \
 
 # URL-encode room ID: ! → %21, : → %3A
 # Example: !Gz7X0zMFF5Wo8EzRW2:mindroom.lab.mindroom.chat → %21Gz7X0zMFF5Wo8EzRW2%3Amindroom.lab.mindroom.chat
-curl -sS -X POST "http://localhost:8008/_matrix/client/v3/rooms/ENCODED_ROOM_ID/invite" \
+curl -sS -X POST "http://localhost:8008/_matrix/client/v3/rooms/$ENCODED_ROOM_ID/invite" \
   -H "Authorization: Bearer $BOT_TOKEN" -H 'Content-Type: application/json' \
   -d "{\"user_id\":\"@$username:mindroom.lab.mindroom.chat\"}"
 ```
@@ -182,7 +190,7 @@ curl -sS -X POST "http://localhost:8008/_matrix/client/v3/rooms/ENCODED_ROOM_ID/
 ### Step 3: Accept invite as test user
 
 ```bash
-curl -sS -X POST "http://localhost:8008/_matrix/client/v3/join/ENCODED_ROOM_ID" \
+curl -sS -X POST "http://localhost:8008/_matrix/client/v3/join/$ENCODED_ROOM_ID" \
   -H "Authorization: Bearer $access_token" -H 'Content-Type: application/json' -d '{}'
 ```
 
