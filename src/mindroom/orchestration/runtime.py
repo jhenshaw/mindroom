@@ -602,15 +602,15 @@ async def stop_entities(
     sync_tasks: dict[str, asyncio.Task],
 ) -> None:
     """Stop a set of entities and remove them from runtime maps."""
-    # Cancel teardown-sensitive background work before stopping sync loops.
+    # Stop sync loops before certifying callback drains; otherwise fresh callbacks can
+    # appear after the checkpoint decision.
+    for entity_name in entities_to_restart:
+        await cancel_sync_task(entity_name, sync_tasks, cancel_msg=SYNC_RESTART_CANCEL_MSG)
+
     for entity_name in entities_to_restart:
         bot = agent_bots.get(entity_name)
         if bot is not None:
             await bot.prepare_for_sync_shutdown()
-
-    # Cancel sync tasks next so restarted entities do not accumulate duplicate loops.
-    for entity_name in entities_to_restart:
-        await cancel_sync_task(entity_name, sync_tasks, cancel_msg=SYNC_RESTART_CANCEL_MSG)
 
     stop_tasks = [
         agent_bots[entity_name].stop(reason="restart")
@@ -639,11 +639,6 @@ async def _handle_sync_iteration_cleanup_timeout(
     await _hold_supervisor_until_sync_task_finishes(bot, iteration.sync_task)
 
 
-def _sync_restart_should_stop(bot: AgentBot | TeamBot, retry_count: int, max_retries: int) -> bool:
-    """Return whether the sync restart loop should stop before another attempt."""
-    return not bot.running or (max_retries >= 0 and retry_count >= max_retries)
-
-
 async def _cleanup_sync_iteration_after_attempt(
     bot: AgentBot | TeamBot,
     iteration: _SyncIteration,
@@ -651,14 +646,37 @@ async def _cleanup_sync_iteration_after_attempt(
     prepared_for_sync_shutdown: bool,
 ) -> bool:
     """Clean up one sync attempt and return whether the supervisor must stop."""
-    if not prepared_for_sync_shutdown:
-        await bot.prepare_for_sync_shutdown()
     try:
         await iteration.cancel()
     except _MatrixSyncCancellationTimeoutError:
+        if not prepared_for_sync_shutdown:
+            await bot.prepare_for_sync_shutdown()
         await _handle_sync_iteration_cleanup_timeout(bot, iteration)
         return True
+    if not prepared_for_sync_shutdown:
+        await bot.prepare_for_sync_shutdown()
     return False
+
+
+def _sync_restart_should_stop(
+    bot: AgentBot | TeamBot,
+    *,
+    retry_count: int,
+    max_retries: int,
+    should_stop_after_cleanup: bool,
+) -> bool:
+    """Return whether the sync restart loop should stop before another attempt."""
+    if should_stop_after_cleanup or not bot.running:
+        return True
+    if max_retries < 0 or retry_count < max_retries:
+        return False
+    logger.error(
+        "sync_loop_retries_exhausted",
+        agent=bot.agent_name,
+        retry_count=retry_count,
+        max_retries=max_retries,
+    )
+    return True
 
 
 async def sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int = -1) -> None:
@@ -672,8 +690,15 @@ async def sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int = 
             logger.info("starting_sync_loop", agent=bot.agent_name)
             iteration = _SyncIteration.start(bot)
             await iteration.wait()
-            # sync_forever returned normally, so the bot was stopped intentionally.
-            break
+            if not bot.running:
+                # sync_forever returned normally after an intentional stop.
+                break
+            retry_count += 1
+            logger.warning(
+                "sync_loop_returned_while_bot_running",
+                agent=bot.agent_name,
+                retry_count=retry_count,
+            )
         except asyncio.CancelledError:
             # Task cancellation is part of normal shutdown.
             logger.info("sync_task_cancelled", agent=bot.agent_name)
@@ -701,7 +726,12 @@ async def sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int = 
                     prepared_for_sync_shutdown=prepared_for_sync_shutdown,
                 )
 
-        if should_stop_after_cleanup or _sync_restart_should_stop(bot, retry_count, max_retries):
+        if _sync_restart_should_stop(
+            bot,
+            retry_count=retry_count,
+            max_retries=max_retries,
+            should_stop_after_cleanup=should_stop_after_cleanup,
+        ):
             break
 
         wait_time = retry_delay_seconds(
