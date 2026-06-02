@@ -636,11 +636,11 @@ async def test_router_ignores_invite_when_accept_invites_disabled(
 
 
 @pytest.mark.asyncio
-async def test_router_leave_unconfigured_rooms_preserves_persisted_invited_room(
+async def test_router_leave_unconfigured_rooms_backfills_joined_invited_rooms(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Router cleanup should preserve a previously accepted invited room."""
+    """Router cleanup should preserve and backfill accepted invited rooms."""
     config = bind_runtime_paths(
         Config(router=RouterConfig(model="default", accept_invites=True)),
         test_runtime_paths(tmp_path),
@@ -680,8 +680,14 @@ async def test_router_leave_unconfigured_rooms_preserves_persisted_invited_room(
 
     await bot.leave_unconfigured_rooms()
 
-    assert bot._room_lifecycle.invited_rooms == {"!router-invited:localhost"}
-    assert left_room_ids == ["!old-room:localhost"]
+    assert bot._room_lifecycle.invited_rooms == {
+        "!old-room:localhost",
+        "!router-invited:localhost",
+    }
+    assert invited_rooms_path.read_text(encoding="utf-8") == (
+        '[\n  "!old-room:localhost",\n  "!router-invited:localhost"\n]\n'
+    )
+    assert left_room_ids == []
 
 
 @pytest.mark.asyncio
@@ -812,7 +818,8 @@ async def test_router_preserves_root_space_when_leaving_unconfigured_rooms(
 
     await bot.leave_unconfigured_rooms()
 
-    assert set(left_room_ids) == {"!room2:localhost"}
+    assert left_room_ids == []
+    assert bot._room_lifecycle.invited_rooms == {"!room2:localhost"}
     assert "!space:localhost" not in left_room_ids
 
 
@@ -1138,11 +1145,11 @@ async def test_agent_invite_does_not_auto_add_router_to_ad_hoc_room(
 
 
 @pytest.mark.asyncio
-async def test_leave_unconfigured_rooms_preserves_persisted_invited_room(
+async def test_leave_unconfigured_rooms_backfills_joined_invited_rooms(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Cleanup should preserve one previously invited non-DM room."""
+    """Cleanup should preserve and backfill accepted invited non-DM rooms."""
     agent_user = AgentMatrixUser(
         agent_name="agent1",
         user_id="@mindroom_agent1:localhost",
@@ -1193,8 +1200,14 @@ async def test_leave_unconfigured_rooms_preserves_persisted_invited_room(
 
     await bot.leave_unconfigured_rooms()
 
-    assert bot._room_lifecycle.invited_rooms == {"!invited-room:localhost"}
-    assert left_room_ids == ["!old-room:localhost"]
+    assert bot._room_lifecycle.invited_rooms == {
+        "!invited-room:localhost",
+        "!old-room:localhost",
+    }
+    assert invited_rooms_path.read_text(encoding="utf-8") == (
+        '[\n  "!invited-room:localhost",\n  "!old-room:localhost"\n]\n'
+    )
+    assert left_room_ids == []
 
 
 def test_load_invited_rooms_returns_empty_set_for_invalid_utf8(tmp_path: Path) -> None:
