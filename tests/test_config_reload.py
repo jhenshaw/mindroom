@@ -1059,6 +1059,9 @@ async def test_initialize_disables_non_router_entity_when_account_provisioning_f
                     "model": "default",
                 },
             },
+            cultures={
+                "flash_only": {"description": "Flash only", "agents": ["mind_flash"], "mode": "automatic"},
+            },
             models={"default": {"provider": "test", "id": "test-model"}},
         ),
         tmp_path,
@@ -1103,7 +1106,72 @@ async def test_initialize_disables_non_router_entity_when_account_provisioning_f
     assert created_bots == [ROUTER_AGENT_NAME, "general"]
     assert set(orchestrator.config.agents) == {"general"}
     assert orchestrator.config.teams == {}
+    assert orchestrator.config.cultures == {}
     assert orchestrator._account_preparation_failed_entities == {"mind_flash", "flash_team"}
+
+
+@pytest.mark.asyncio
+async def test_initialize_disables_non_router_entity_when_account_preflight_fails(tmp_path: Path) -> None:
+    """Per-entity preflight failures should be handled by partial startup."""
+    config = _runtime_bound_config(
+        Config(
+            agents={
+                "general": {"display_name": "GeneralAgent", "model": "default"},
+                "mind_flash": {"display_name": "MindFlash", "model": "default"},
+            },
+            models={"default": {"provider": "test", "id": "test-model"}},
+        ),
+        tmp_path,
+    )
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
+    created_bots: list[str] = []
+
+    def preflight(
+        _config: Config,
+        entity_names: Iterable[str],
+        *,
+        include_internal_user: bool,
+    ) -> None:
+        del _config, include_internal_user
+        if "mind_flash" in entity_names:
+            msg = "preflight rejected"
+            raise PermanentStartupError(msg)
+
+    async def create_user(
+        _homeserver: str,
+        entity_name: str,
+        display_name: str,
+        *,
+        runtime_paths: object,
+        username: str | None = None,
+    ) -> AgentMatrixUser:
+        del runtime_paths, username
+        return AgentMatrixUser(
+            agent_name=entity_name,
+            user_id=f"@actual_{entity_name}:localhost",
+            display_name=display_name,
+            password=TEST_PASSWORD,
+        )
+
+    def create_bot(entity_name: str, *_args: object, **_kwargs: object) -> MagicMock:
+        created_bots.append(entity_name)
+        return MagicMock()
+
+    with (
+        patch("mindroom.orchestrator.load_config", return_value=config),
+        patch("mindroom.orchestrator.load_plugins", return_value=[]),
+        patch("mindroom.orchestrator.create_agent_user", new=create_user),
+        patch.object(orchestrator, "_preflight_account_provisioning", new=preflight),
+        patch.object(orchestrator, "_prepare_user_account", new=AsyncMock()),
+        patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
+        patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
+        patch("mindroom.orchestrator.create_bot_for_entity", side_effect=create_bot),
+    ):
+        await orchestrator.initialize()
+
+    assert created_bots == [ROUTER_AGENT_NAME, "general"]
+    assert set(orchestrator.config.agents) == {"general"}
+    assert orchestrator._account_preparation_failed_entities == {"mind_flash"}
 
 
 @pytest.mark.asyncio

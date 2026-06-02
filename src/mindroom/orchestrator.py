@@ -789,7 +789,8 @@ class _MultiAgentOrchestrator:
         failed_entities: list[str] = []
         entity_names = tuple(entity_names)
         self._last_account_preparation_failed_entities = []
-        self._preflight_account_provisioning(config, entity_names=entity_names, include_internal_user=False)
+        if not allow_partial:
+            self._preflight_account_provisioning(config, entity_names=entity_names, include_internal_user=False)
 
         async def _prepare_accounts() -> None:
             nonlocal failed_entities, users
@@ -797,6 +798,12 @@ class _MultiAgentOrchestrator:
             permanently_failed_entities: list[str] = []
             for entity_name in entity_names:
                 try:
+                    if allow_partial:
+                        self._preflight_account_provisioning(
+                            config,
+                            entity_names=[entity_name],
+                            include_internal_user=False,
+                        )
                     prepared_users[entity_name] = await create_agent_user(
                         homeserver,
                         entity_name,
@@ -919,12 +926,11 @@ class _MultiAgentOrchestrator:
         active_teams = {
             team_name: team_config for team_name, team_config in config.teams.items() if team_name not in disabled_teams
         }
-        active_cultures = {
-            culture_name: culture_config.model_copy(
-                update={"agents": [agent_name for agent_name in culture_config.agents if agent_name in active_agents]},
-            )
-            for culture_name, culture_config in config.cultures.items()
-        }
+        active_cultures = {}
+        for culture_name, culture_config in config.cultures.items():
+            active_culture_agents = [agent_name for agent_name in culture_config.agents if agent_name in active_agents]
+            if active_culture_agents:
+                active_cultures[culture_name] = culture_config.model_copy(update={"agents": active_culture_agents})
         active_reply_permissions = {
             entity_name: user_ids
             for entity_name, user_ids in config.authorization.agent_reply_permissions.items()
@@ -1166,7 +1172,7 @@ class _MultiAgentOrchestrator:
         config = load_config(self.runtime_paths, tolerate_plugin_load_errors=True)
         hook_registry = self._build_hook_registry(config)
         entity_names = self._configured_entity_names(config)
-        self._preflight_account_provisioning(config, entity_names=entity_names, include_internal_user=True)
+        self._preflight_account_provisioning(config, entity_names=[], include_internal_user=True)
         await self._prepare_user_account(config, update_runtime_state=True)
         self._last_account_preparation_failed_entities = []
         entity_users = await self._prepare_entity_accounts(config, entity_names, allow_partial=True)
@@ -1391,7 +1397,7 @@ class _MultiAgentOrchestrator:
         """Handle config loading before the runtime has an active config."""
         self._preflight_account_provisioning(
             new_config,
-            entity_names=self._configured_entity_names(new_config),
+            entity_names=[],
             include_internal_user=True,
         )
         await self._prepare_user_account(new_config, update_runtime_state=not self.running)
