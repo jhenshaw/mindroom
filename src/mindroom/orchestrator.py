@@ -891,6 +891,19 @@ class _MultiAgentOrchestrator:
         requests.extend(ManagedAccountProvisioningRequest(entity_name) for entity_name in entity_names)
         preflight_managed_account_provisioning(requests, self.runtime_paths)
 
+    def _preflight_internal_user_entity_collisions(self, config: Config) -> None:
+        """Reject generated internal-user/entity localpart collisions before account writes."""
+        if config.mindroom_user is None:
+            return
+        requests = [
+            ManagedAccountProvisioningRequest(
+                INTERNAL_USER_AGENT_NAME,
+                username=config.mindroom_user.username,
+            ),
+            *(ManagedAccountProvisioningRequest(entity_name) for entity_name in self._configured_entity_names(config)),
+        ]
+        preflight_managed_account_provisioning(requests, self.runtime_paths)
+
     def _filter_runtime_config_for_account_failures(
         self,
         config: Config,
@@ -1172,6 +1185,7 @@ class _MultiAgentOrchestrator:
         config = load_config(self.runtime_paths, tolerate_plugin_load_errors=True)
         hook_registry = self._build_hook_registry(config)
         entity_names = self._configured_entity_names(config)
+        self._preflight_internal_user_entity_collisions(config)
         self._preflight_account_provisioning(config, entity_names=[], include_internal_user=True)
         await self._prepare_user_account(config, update_runtime_state=True)
         self._last_account_preparation_failed_entities = []
@@ -1395,6 +1409,7 @@ class _MultiAgentOrchestrator:
 
     async def _load_initial_config(self, new_config: Config, hook_registry: HookRegistry) -> bool:
         """Handle config loading before the runtime has an active config."""
+        self._preflight_internal_user_entity_collisions(new_config)
         self._preflight_account_provisioning(
             new_config,
             entity_names=[],
@@ -1585,6 +1600,8 @@ class _MultiAgentOrchestrator:
     async def _prepare_accounts_for_config_update(self, new_config: Config, plan: ConfigUpdatePlan) -> None:
         """Prepare or validate managed Matrix accounts before publishing a reloaded config."""
         entities_requiring_account_check = plan.added_entities | (plan.entities_to_restart & plan.configured_entities)
+        if plan.mindroom_user_changed:
+            self._preflight_internal_user_entity_collisions(new_config)
         self._preflight_account_provisioning(
             new_config,
             entity_names=entities_requiring_account_check,
