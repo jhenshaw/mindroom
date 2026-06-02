@@ -513,7 +513,7 @@ def test_openclaw_compat_expands_to_implied_tools() -> None:
     config.agents["summary"].tools = ["openclaw_compat"]
     config.agents["summary"].include_default_tools = False
 
-    assert config.get_agent_tools("summary") == [
+    assert config.get_agent_available_tools("summary") == [
         "openclaw_compat",
         "shell",
         "coding",
@@ -539,7 +539,7 @@ def test_openclaw_compat_expansion_dedupes_preserving_order() -> None:
     ]
     config.defaults.tools = ["openclaw_compat", "python", "scheduler"]
 
-    assert config.get_agent_tools("summary") == [
+    assert config.get_agent_available_tools("summary") == [
         "browser",
         "openclaw_compat",
         "shell",
@@ -570,7 +570,7 @@ def test_create_agent_uses_native_tool_lookups_for_openclaw_compat(
     _create_agent_for_test("summary", config=config)
 
     looked_up_tools = [call.args[0] for call in mock_get_tool_by_name.call_args_list]
-    assert looked_up_tools == config.get_agent_tools("summary")
+    assert looked_up_tools == config.get_agent_available_tools("summary")
 
 
 @patch("mindroom.agents.get_tool_by_name")
@@ -1670,7 +1670,7 @@ def test_openclaw_compat_implies_matrix_message_tool(mock_storage: MagicMock) ->
     config.agents["summary"].tools = ["openclaw_compat"]
     config.agents["summary"].include_default_tools = False
 
-    effective_tools = config.get_agent_tools("summary")
+    effective_tools = config.get_agent_available_tools("summary")
     assert "openclaw_compat" in effective_tools
     assert "matrix_message" in effective_tools
 
@@ -1685,7 +1685,7 @@ def test_openclaw_compat_implied_matrix_message_does_not_duplicate() -> None:
     config.agents["summary"].tools = ["openclaw_compat", "matrix_message"]
     config.agents["summary"].include_default_tools = False
 
-    effective_tools = config.get_agent_tools("summary")
+    effective_tools = config.get_agent_available_tools("summary")
     assert effective_tools.count("matrix_message") == 1
 
 
@@ -1695,7 +1695,7 @@ def test_matrix_message_implies_attachments_and_matrix_room_tools() -> None:
     config.agents["summary"].tools = ["matrix_message"]
     config.agents["summary"].include_default_tools = False
 
-    effective_tools = config.get_agent_tools("summary")
+    effective_tools = config.get_agent_available_tools("summary")
     assert effective_tools == ["matrix_message", "attachments", "matrix_room"]
 
 
@@ -1705,7 +1705,7 @@ def test_matrix_message_implied_attachments_does_not_duplicate() -> None:
     config.agents["summary"].tools = ["matrix_message", "attachments"]
     config.agents["summary"].include_default_tools = False
 
-    effective_tools = config.get_agent_tools("summary")
+    effective_tools = config.get_agent_available_tools("summary")
     assert effective_tools.count("attachments") == 1
 
 
@@ -2828,6 +2828,41 @@ def test_config_rejects_legacy_defaults_toolkit_fields() -> None:
         Config(
             defaults={"initial_toolkits": ["shell"]},
             agents={"calculator": {"display_name": "CalculatorAgent"}},
+        )
+
+
+def test_config_rejects_legacy_agent_toolkit_fields_with_bundle_safe_hint() -> None:
+    """Removed agent toolkit knobs should point users to expand presets before lazy flags."""
+    with pytest.raises(
+        ValidationError,
+        match=re.escape(
+            "Agent field 'allowed_toolkits' was removed. Expand toolkit/preset/bundle entries into individual "
+            "tools before applying per-tool defer flags in tools.",
+        ),
+    ):
+        Config(
+            agents={
+                "calculator": {
+                    "display_name": "CalculatorAgent",
+                    "allowed_toolkits": ["shell"],
+                },
+            },
+        )
+
+    with pytest.raises(
+        ValidationError,
+        match=re.escape(
+            "Agent field 'initial_toolkits' was removed. Expand toolkit/preset/bundle entries into individual "
+            "tools before applying per-tool initial flags in tools.",
+        ),
+    ):
+        Config(
+            agents={
+                "calculator": {
+                    "display_name": "CalculatorAgent",
+                    "initial_toolkits": ["shell"],
+                },
+            },
         )
 
 
