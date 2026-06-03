@@ -26,7 +26,7 @@ from mindroom.credentials import CredentialsManager, get_runtime_credentials_man
 from mindroom.redaction import redact_sensitive_text
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY, SHARED_CREDENTIALS_PATH_ENV
 from mindroom.tool_system.dependencies import ensure_optional_deps
-from mindroom.tool_system.worker_routing import worker_dir_name
+from mindroom.tool_system.worker_routing import resolved_worker_key_scope, worker_dir_name, worker_key_agent_name
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends._dedicated_worker_common import (
     build_dedicated_worker_runtime_paths,
@@ -116,7 +116,6 @@ _STARTUP_RUNTIME_PATHS_ENV = "MINDROOM_RUNTIME_PATHS_JSON"
 _DEDICATED_WORKER_KEY_ENV = SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"]
 _DEDICATED_WORKER_ROOT_ENV = SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"]
 _SHARED_STORAGE_ROOT_ENV = SANDBOX_RUNTIME_ENV_BY_KEY["shared_storage_root"]
-_CONTAINER_SHARED_STORAGE_ROOT = "/app/shared-storage"
 
 _LABEL_COMPONENT = "mindroom.ai/component"
 _LABEL_COMPONENT_VALUE = "worker"
@@ -795,6 +794,11 @@ class DockerWorkerBackend:
             worker_key=worker_key,
             dedicated_root=dedicated_root,
         )
+        # Docker bind-mounts canonical agent state under the same root used as
+        # MINDROOM_STORAGE_PATH. Keep the runner's shared-storage root aligned
+        # so agent workspaces resolve to mounted host files, not an empty worker
+        # state directory.
+        shared_storage_root = self.config.storage_mount_path
         env = {
             SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]: "true",
             SANDBOX_RUNTIME_ENV_BY_KEY["runner_execution_mode"]: "subprocess",
@@ -805,11 +809,11 @@ class DockerWorkerBackend:
                 sort_keys=True,
             ),
             "MINDROOM_STORAGE_PATH": self.config.storage_mount_path,
-            _SHARED_STORAGE_ROOT_ENV: _CONTAINER_SHARED_STORAGE_ROOT,
+            _SHARED_STORAGE_ROOT_ENV: shared_storage_root,
             SHARED_CREDENTIALS_PATH_ENV: f"{self.config.storage_mount_path}/.shared_credentials",
             _DEDICATED_WORKER_KEY_ENV: worker_key,
             _DEDICATED_WORKER_ROOT_ENV: self.config.storage_mount_path,
-            "HOME": self.config.storage_mount_path,
+            "HOME": self._container_home_path(worker_key),
             _TOKEN_ENV_NAME: self.auth_token,
         }
         if self.config.host_config_path is not None:
@@ -857,9 +861,19 @@ class DockerWorkerBackend:
             config_path=self._worker_runtime_config_path(),
             dedicated_root=dedicated_root,
             worker_port=self.config.worker_port,
-            shared_storage_root=_CONTAINER_SHARED_STORAGE_ROOT,
+            shared_storage_root=self.config.storage_mount_path,
             extra_env=self.config.extra_env,
         )
+
+    def _container_home_path(self, worker_key: str) -> str:
+        agent_name = worker_key_agent_name(worker_key)
+        if agent_name is None:
+            return self.config.storage_mount_path
+        if resolved_worker_key_scope(worker_key) == "user_agent":
+            # Private workspaces can be renamed in config, so the request
+            # preparation layer remains the source of truth for the command cwd.
+            return self.config.storage_mount_path
+        return str(Path(self.config.storage_mount_path) / "agents" / agent_name / "workspace")
 
     def _container_volumes(
         self,
@@ -902,7 +916,7 @@ class DockerWorkerBackend:
             for planned_root in plan_scoped_visible_state_roots(
                 worker_key=worker_key,
                 local_shared_storage_root=self._storage_path,
-                worker_visible_shared_storage_root=Path(_CONTAINER_SHARED_STORAGE_ROOT),
+                worker_visible_shared_storage_root=Path(self.config.storage_mount_path),
                 private_agent_names=private_agent_names,
                 allow_unknown_worker_key=False,
                 resolved_agent_policies=self._projection_manager.current_resolved_agent_policies(),
