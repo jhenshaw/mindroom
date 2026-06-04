@@ -663,4 +663,8 @@ def _voice_mention_entity_name(
             return None
         return registry.current_entity_name_for_user_id(user_id, include_router=False)
 
-    return resolve_entity_name_for_mention_localpart(localpart, config)
+    return resolve_entity_name_for_mention_localpart(
+        localpart,
+        config,
+        allow_generated_agent_localparts=False,
+    )
