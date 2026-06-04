@@ -10,6 +10,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.identity import MatrixID, parse_current_matrix_user_id
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
+from mindroom.matrix_identifiers import unnamespaced_agent_name_from_username_localpart
 from mindroom.tool_system.events import build_tool_trace_content, ensure_visible_tool_marker_spacing
 
 if TYPE_CHECKING:
@@ -301,9 +302,24 @@ def _find_matching_entity_name_for_localpart(
     config: Config,
 ) -> str | None:
     """Return the configured agent or team name matched by one localpart string, if any."""
-    lower_localpart = localpart.lower()
+    entities = [*config.agents, *config.teams]
 
-    for entity_name in [*config.agents, *config.teams]:
+    if entity_name := _find_matching_entity_name(localpart, entities):
+        return entity_name
+
+    generated_name = unnamespaced_agent_name_from_username_localpart(localpart)
+    if generated_name is None or generated_name.lower().startswith("user_"):
+        return None
+    return _find_matching_entity_name(generated_name, entities)
+
+
+def _find_matching_entity_name(
+    localpart: str,
+    entities: list[str],
+) -> str | None:
+    """Return the configured entity name matched by one localpart candidate."""
+    lower_localpart = localpart.lower()
+    for entity_name in entities:
         if entity_name == ROUTER_AGENT_NAME:
             continue
         if entity_name.lower() == lower_localpart:
