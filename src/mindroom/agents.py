@@ -34,7 +34,12 @@ from mindroom.runtime_resolution import (
 )
 from mindroom.timing import timed
 from mindroom.tool_approval import tool_requires_approval_for_openai_compat
-from mindroom.tool_system.catalog import TOOL_METADATA, get_tool_by_name
+from mindroom.tool_system.catalog import (
+    TOOL_METADATA,
+    default_worker_routed_tools,
+    ensure_tool_registry_loaded,
+    get_tool_by_name,
+)
 from mindroom.tool_system.dynamic_toolkits import (
     VisibleToolSurface,
     deferred_tool_catalog_entries,
@@ -546,6 +551,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
     config: Config,
     runtime_paths: constants.RuntimePaths,
     worker_tools: list[str],
+    runtime_overrides: dict[str, object] | None,
     agent_runtime: ResolvedAgentRuntime | None = None,
     tool_config_overrides: dict[str, object] | None = None,
     execution_identity: ToolExecutionIdentity | None,
@@ -555,6 +561,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
 ) -> Toolkit | None:
     """Build one configured toolkit for an agent.
 
+    Callers own runtime override resolution before invoking this builder.
     Returns ``None`` when the configured tool should be skipped, such as an
     explicit ``delegate`` entry without valid delegation targets.
     """
@@ -691,7 +698,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
         config.defaults.tool_output_auto_save_threshold_bytes,
         agent_runtime.is_private,
         execution_identity,
-        config.get_agent_tool_runtime_overrides(agent_name, tool_name, runtime_paths=runtime_paths),
+        runtime_overrides,
         worker_egress_broker.execution_env if worker_egress_broker is not None else None,
     )
 
@@ -721,6 +728,8 @@ def _resolve_runtime_worker_tools(
     config: Config,
     runtime_paths: constants.RuntimePaths,
     runtime_tool_names: list[str],
+    *,
+    tool_registry_preloaded: bool = False,
 ) -> list[str]:
     """Return worker-routed tools for one concrete runtime tool selection."""
     agent_config = config.get_agent(agent_name)
@@ -730,9 +739,8 @@ def _resolve_runtime_worker_tools(
     if configured is not None:
         return config.expand_tool_names(list(configured))
 
-    from mindroom.tool_system.catalog import default_worker_routed_tools, ensure_tool_registry_loaded  # noqa: PLC0415
-
-    ensure_tool_registry_loaded(runtime_paths, config)
+    if not tool_registry_preloaded:
+        ensure_tool_registry_loaded(runtime_paths, config)
     return default_worker_routed_tools(runtime_tool_names)
 
 
@@ -936,6 +944,11 @@ def _resolve_agent_culture(
 @timed("system_prompt_assembly.agent_create.load_plugins")
 def _load_agent_plugins(config: Config, runtime_paths: constants.RuntimePaths) -> list[HookRegistryPlugin]:
     return cast("list[HookRegistryPlugin]", load_plugins(config, runtime_paths))
+
+
+@timed("system_prompt_assembly.agent_create.tool_registry_sync")
+def _sync_agent_tool_registry(config: Config, runtime_paths: constants.RuntimePaths) -> None:
+    ensure_tool_registry_loaded(runtime_paths, config, load_plugin_tools=False)
 
 
 @timed("system_prompt_assembly.agent_create.hook_bridge")
@@ -1146,6 +1159,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     defaults = config.defaults
 
     plugins = _load_agent_plugins(config, runtime_paths)
+    _sync_agent_tool_registry(config, runtime_paths)
     tool_hook_bridge = _build_agent_tool_hook_bridge(
         hook_registry=hook_registry,
         plugins=plugins,
@@ -1183,17 +1197,20 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         config,
         runtime_paths,
         list(resolved_tool_configs),
+        tool_registry_preloaded=True,
     )
     workspace = agent_runtime.workspace
     tools: list[Toolkit] = []
     for tool_name in resolved_tool_configs:
         try:
+            runtime_overrides = config.get_agent_tool_runtime_overrides(agent_name, tool_name)
             toolkit = build_agent_toolkit(
                 tool_name,
                 agent_name=agent_name,
                 config=config,
                 runtime_paths=runtime_paths,
                 worker_tools=worker_tools,
+                runtime_overrides=runtime_overrides,
                 agent_runtime=agent_runtime,
                 tool_config_overrides=resolved_tool_configs.get(tool_name),
                 session_id=session_id,

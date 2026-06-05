@@ -599,6 +599,25 @@ def test_create_agent_passes_merged_tool_config_overrides_to_registered_tools(
 
 @patch("mindroom.agents.get_tool_by_name")
 @patch("mindroom.agent_storage.SqliteDb")
+def test_create_agent_bootstraps_tool_registry_once_for_multiple_tools(
+    mock_storage: MagicMock,  # noqa: ARG001
+    mock_get_tool_by_name: MagicMock,
+) -> None:
+    """Agent construction should not reload plugin/MCP registry state per toolkit."""
+    mock_get_tool_by_name.return_value = MagicMock()
+    config = _test_config()
+    config.agents["general"].tools = ["shell", "coding", "duckduckgo", "website"]
+    config.agents["general"].include_default_tools = False
+
+    with patch("mindroom.agents.ensure_tool_registry_loaded") as mock_ensure_registry:
+        _create_agent_for_test("general", config=config)
+
+    assert len(mock_get_tool_by_name.call_args_list) == 4
+    assert mock_ensure_registry.call_count == 1
+
+
+@patch("mindroom.agents.get_tool_by_name")
+@patch("mindroom.agent_storage.SqliteDb")
 def test_create_agent_keeps_runtime_base_dir_separate_from_authored_tool_config(
     mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
@@ -807,6 +826,7 @@ def test_direct_agent_toolkit_exposes_output_redirect_for_workspace_agent(tmp_pa
         config=config,
         runtime_paths=runtime_paths,
         worker_tools=[],
+        runtime_overrides=None,
         agent_runtime=agent_runtime,
         execution_identity=None,
     )
@@ -837,6 +857,7 @@ def test_memory_toolkit_is_omitted_when_agent_memory_is_disabled(tmp_path: Path)
         config=config,
         runtime_paths=runtime_paths,
         worker_tools=[],
+        runtime_overrides=None,
         agent_runtime=agent_runtime,
         execution_identity=None,
     )
