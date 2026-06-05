@@ -437,16 +437,20 @@ def _execution_env_payload(
     *,
     runtime_paths: RuntimePaths,
     extra_env_passthrough: str | None = None,
+    worker_egress_env: Mapping[str, str] | None = None,
 ) -> dict[str, str] | None:
     """Return explicit execution env only for tools that intentionally support it."""
     if tool_name not in EXECUTION_ENV_TOOL_NAMES:
         return None
-    return build_execution_tool_env(
+    env = build_execution_tool_env(
         tool_name,
         runtime_paths,
         extra_env_passthrough=extra_env_passthrough,
         shell_process_env=runtime_paths.process_env,
     )
+    if worker_egress_env:
+        env.update(worker_egress_env)
+    return env
 
 
 def attachment_save_uses_worker(
@@ -864,6 +868,7 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
     tool_config_overrides: dict[str, object] | None = None,
     tool_init_overrides: dict[str, object] | None = None,
     extra_env_passthrough: str | None = None,
+    worker_egress_env: Mapping[str, str] | None = None,
     worker_tools_override: list[str] | None = None,
     worker_target: ResolvedWorkerTarget | None = None,
 ) -> Toolkit:
@@ -884,6 +889,7 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
         tool_name,
         runtime_paths=runtime_paths,
         extra_env_passthrough=extra_env_passthrough,
+        worker_egress_env=worker_egress_env,
     )
     original_functions = toolkit.functions
     original_async_functions = toolkit.async_functions

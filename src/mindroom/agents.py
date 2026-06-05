@@ -56,7 +56,7 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workspaces import ensure_workspace_template
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from agno.knowledge.protocol import KnowledgeProtocol
     from agno.models.base import Model
@@ -445,6 +445,7 @@ def _build_registered_agent_tool(
     routing_agent_is_private: bool,
     execution_identity: ToolExecutionIdentity | None,
     runtime_overrides: dict[str, object] | None,
+    worker_egress_env: Mapping[str, str] | None,
 ) -> Toolkit:
     """Build one registered toolkit using the resolved routing inputs for this agent."""
     worker_target = build_worker_target_from_runtime_env(
@@ -474,6 +475,7 @@ def _build_registered_agent_tool(
         allowed_shared_services=allowed_shared_services,
         tool_output_workspace_root=workspace_path,
         tool_output_auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
+        worker_egress_env=worker_egress_env,
         worker_target=worker_target,
     )
 
@@ -674,6 +676,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
             tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
         )
 
+    worker_egress_broker = config.get_agent_worker_egress_broker(agent_name)
     return _build_registered_agent_tool(
         tool_name,
         runtime_paths,
@@ -689,6 +692,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
         agent_runtime.is_private,
         execution_identity,
         config.get_agent_tool_runtime_overrides(agent_name, tool_name, runtime_paths=runtime_paths),
+        worker_egress_broker.execution_env if worker_egress_broker is not None else None,
     )
 
 
