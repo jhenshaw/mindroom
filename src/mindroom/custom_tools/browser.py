@@ -20,7 +20,9 @@ from agno.tools import Toolkit
 from playwright.async_api import BrowserContext, ConsoleMessage, Dialog, Page, Playwright, async_playwright
 from playwright.async_api import Error as PlaywrightError
 
+from mindroom.browser_fetch_guard import continue_or_abort_browser_fetch
 from mindroom.logging_config import get_logger
+from mindroom.server_fetch_url import validate_server_fetch_url
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
@@ -394,9 +396,16 @@ class _BrowserFunctionNotRegisteredError(RuntimeError):
 class BrowserTools(Toolkit):
     """Browser control for MindRoom agents."""
 
-    def __init__(self, runtime_paths: RuntimePaths, *, output_dir: Path | str | None = None) -> None:
+    def __init__(
+        self,
+        runtime_paths: RuntimePaths,
+        *,
+        output_dir: Path | str | None = None,
+        allow_private_networks: bool = False,
+    ) -> None:
         super().__init__(name="browser", tools=[self.browser])
         self._runtime_paths = runtime_paths
+        self._allow_private_networks = allow_private_networks
         self._profiles: dict[str, _BrowserProfileState] = {}
         self._lock = asyncio.Lock()
         self._output_dir = Path(output_dir).expanduser().resolve() if output_dir is not None else None
@@ -443,7 +452,7 @@ class BrowserTools(Toolkit):
             return
         self._close_task = loop.create_task(self._close_profiles())
 
-    async def browser(  # noqa: C901, PLR0911, PLR0912
+    async def browser(  # noqa: C901, PLR0911, PLR0912, PLR0915
         self,
         action: str,
         target: str | None = None,
@@ -540,6 +549,7 @@ class BrowserTools(Toolkit):
             if target_url is None:
                 msg = "targetUrl required for action=open"
                 raise ValueError(msg)
+            target_url = validate_server_fetch_url(target_url, allow_private_networks=self._allow_private_networks)
             return json.dumps(await self._open_tab(profile_name, target_url), sort_keys=True)
         if normalized_action == "focus":
             target_id = _clean_str(targetId)
@@ -585,6 +595,7 @@ class BrowserTools(Toolkit):
             if target_url is None:
                 msg = "targetUrl required for action=navigate"
                 raise ValueError(msg)
+            target_url = validate_server_fetch_url(target_url, allow_private_networks=self._allow_private_networks)
             return json.dumps(
                 await self._navigate(profile_name, target_url, _clean_str(targetId)),
                 sort_keys=True,
@@ -822,7 +833,7 @@ class BrowserTools(Toolkit):
         if selector is None:
             msg = "upload requires inputRef, ref, or element"
             raise ValueError(msg)
-        normalized_paths = [str(Path(path).expanduser()) for path in paths]
+        normalized_paths = [str(self._resolve_upload_path(path)) for path in paths]
         locator = tab.page.locator(selector).first
         await locator.set_input_files(normalized_paths, timeout=timeout_ms or _DEFAULT_TIMEOUT_MS)
         return {
@@ -1181,6 +1192,13 @@ class BrowserTools(Toolkit):
             except Exception:
                 await playwright.stop()
                 raise
+            await context.route(
+                "**/*",
+                lambda route: continue_or_abort_browser_fetch(
+                    route,
+                    allow_private_networks=self._allow_private_networks,
+                ),
+            )
             state = _BrowserProfileState(playwright=playwright, context=context)
             self._profiles[profile_name] = state
 
@@ -1274,6 +1292,27 @@ class BrowserTools(Toolkit):
         self._output_dir = (storage_root / "browser").resolve()
         self._output_dir.mkdir(parents=True, exist_ok=True)
         return self._output_dir
+
+    def _browser_upload_roots(self) -> tuple[Path, ...]:
+        """Return roots whose files can be read by browser upload."""
+        roots = [self._resolve_output_dir().resolve()]
+        context = get_tool_runtime_context()
+        if context is not None and context.storage_path is not None:
+            roots.append(context.storage_path.resolve())
+        return tuple(roots)
+
+    def _resolve_upload_path(self, path: str) -> Path:
+        """Resolve and confine one browser upload path."""
+        resolved = Path(path).expanduser().resolve()
+        if not resolved.is_file():
+            msg = f"upload path must be an existing file: {path}"
+            raise ValueError(msg)
+        roots = self._browser_upload_roots()
+        if any(resolved.is_relative_to(root) for root in roots):
+            return resolved
+        root_list = ", ".join(str(root) for root in roots)
+        msg = f"upload path '{path}' resolves to '{resolved}', outside browser upload root(s): {root_list}"
+        raise ValueError(msg)
 
     @staticmethod
     def _remove_tab(state: _BrowserProfileState, target_id: str) -> None:

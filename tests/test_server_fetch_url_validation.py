@@ -4,9 +4,15 @@ from __future__ import annotations
 
 import socket
 
+import httpx
 import pytest
 
-from mindroom.server_fetch_url import ServerFetchUrlError, validate_server_fetch_url
+from mindroom.server_fetch_url import (
+    ServerFetchHTTPTransport,
+    ServerFetchUrlError,
+    validate_server_fetch_redirect_url,
+    validate_server_fetch_url,
+)
 
 
 def _addrinfo(ip_address: str) -> list[tuple[int, int, int, str, tuple[str, int]]]:
@@ -106,6 +112,11 @@ def test_validate_server_fetch_url_allows_private_when_explicitly_enabled() -> N
     )
 
 
+def test_validate_server_fetch_url_allows_localhost_when_private_is_enabled() -> None:
+    """The local-network opt-in should support local dev servers."""
+    assert validate_server_fetch_url("http://localhost:5173/", allow_private_networks=True) == "http://localhost:5173/"
+
+
 def test_validate_server_fetch_url_keeps_metadata_blocked_when_private_is_enabled() -> None:
     """The local-network opt-in should not open cloud metadata endpoints."""
     with pytest.raises(ServerFetchUrlError):
@@ -157,3 +168,22 @@ def test_validate_server_fetch_url_blocks_link_local_dns_when_private_is_enabled
         validate_server_fetch_url("https://link-local-by-dns.example/", allow_private_networks=True)
 
     assert exc_info.value.reason == "blocked_address"
+
+
+def test_validate_server_fetch_redirect_url_rejects_internal_absolute_redirect() -> None:
+    """Redirect targets should get the same server-side fetch URL validation."""
+    with pytest.raises(ServerFetchUrlError) as exc_info:
+        validate_server_fetch_redirect_url("https://example.com/start", "http://127.0.0.1/admin")
+
+    assert exc_info.value.reason == "private_address"
+
+
+def test_server_fetch_http_transport_rejects_private_request_url_without_network() -> None:
+    """The HTTPX transport should deny unsafe request URLs before opening a socket."""
+    transport = ServerFetchHTTPTransport()
+    request = httpx.Request("GET", "http://127.0.0.1/admin")
+
+    with pytest.raises(ServerFetchUrlError) as exc_info:
+        transport.handle_request(request)
+
+    assert exc_info.value.reason == "private_address"

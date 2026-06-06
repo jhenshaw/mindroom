@@ -5,9 +5,11 @@ import json
 import sys
 from dataclasses import replace
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Never
+from unittest.mock import AsyncMock
 
+import agno.tools.crawl4ai as agno_crawl4ai
 import pytest
 from agno.tools import Toolkit
 
@@ -17,6 +19,7 @@ import mindroom.tool_system.metadata as metadata_module
 import mindroom.tools  # noqa: F401
 from mindroom.config.main import Config, load_config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.server_fetch_url import ServerFetchUrlError
 from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
 from mindroom.tool_system.metadata import (
     _AUTHORED_OVERRIDE_INHERIT,
@@ -45,6 +48,8 @@ from mindroom.tool_system.registry_state import (
     restore_tool_registry_snapshot,
 )
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, resolve_worker_target
+from mindroom.tools.crawl4ai import crawl4ai_tools
+from mindroom.tools.custom_api import custom_api_tools
 
 _BASE_TOOL_REGISTRY = TOOL_REGISTRY.copy()
 _BASE_TOOL_METADATA = TOOL_METADATA.copy()
@@ -184,6 +189,90 @@ def test_homeassistant_private_url_metadata_defaults_to_false() -> None:
     fields = {field.name: field for field in homeassistant.config_fields or []}
 
     assert fields["HOMEASSISTANT_ALLOW_PRIVATE_URL"].default is False
+
+
+@pytest.mark.parametrize(
+    ("base_url", "endpoint", "reason"),
+    [
+        (None, "http://127.0.0.1:8000/admin", "private_address"),
+        ("http://169.254.169.254", "/latest/meta-data/", "metadata_address"),
+    ],
+)
+def test_custom_api_tool_rejects_unsafe_url_before_request(
+    base_url: str | None,
+    endpoint: str,
+    reason: str,
+) -> None:
+    """Custom API calls should validate final URLs before making requests."""
+    tool = custom_api_tools()(base_url=base_url)
+
+    with pytest.raises(ServerFetchUrlError) as exc_info:
+        tool.make_request(endpoint)
+
+    assert exc_info.value.reason == reason
+
+
+def test_crawl4ai_tool_rejects_private_url_before_crawl(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Crawl4AI should reject unsafe URLs before starting browser-backed crawling."""
+
+    async def forbidden_crawl(*_args: object, **_kwargs: object) -> str:
+        msg = "unsafe crawl4ai URL should be rejected before crawling starts"
+        raise AssertionError(msg)
+
+    tool = crawl4ai_tools()()
+    monkeypatch.setattr(tool, "_async_crawl", forbidden_crawl)
+
+    with pytest.raises(ServerFetchUrlError) as exc_info:
+        tool.crawl("http://127.0.0.1:8000/private")
+
+    assert exc_info.value.reason == "private_address"
+
+
+@pytest.mark.asyncio
+async def test_crawl4ai_tool_installs_server_fetch_route_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Crawl4AI should install a Playwright route guard before crawling."""
+    installed_hook = None
+
+    class FakeCrawlerStrategy:
+        def set_hook(self, name: str, hook: object) -> None:
+            nonlocal installed_hook
+            assert name == "on_page_context_created"
+            installed_hook = hook
+
+    class FakeAsyncWebCrawler:
+        def __init__(self, *, config: object) -> None:
+            del config
+            self.crawler_strategy = FakeCrawlerStrategy()
+
+        async def __aenter__(self) -> object:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def arun(self, *, url: str, config: object) -> object:
+            del config
+            assert url == "https://example.com"
+            assert installed_hook is not None
+            page = SimpleNamespace(route=AsyncMock())
+            await installed_hook(page)
+            route_handler = page.route.await_args.args[1]
+            unsafe_route = SimpleNamespace(
+                request=SimpleNamespace(url="http://127.0.0.1/admin"),
+                abort=AsyncMock(),
+                continue_=AsyncMock(),
+            )
+            await route_handler(unsafe_route)
+            unsafe_route.abort.assert_awaited_once_with("blockedbyclient")
+            unsafe_route.continue_.assert_not_called()
+            return SimpleNamespace(fit_markdown="", markdown="", text="public content", html="", success=True)
+
+    monkeypatch.setattr(agno_crawl4ai, "AsyncWebCrawler", FakeAsyncWebCrawler)
+    tool = crawl4ai_tools()()
+
+    result = await tool._async_crawl("https://example.com")
+
+    assert result == "public content"
 
 
 def test_plugin_validation_uses_sys_modules_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
