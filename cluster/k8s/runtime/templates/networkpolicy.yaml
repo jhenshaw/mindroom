@@ -57,7 +57,7 @@ spec:
     -
       {{- with $dns.to }}
       to:
-        {{- toYaml $dns.to | nindent 8 }}
+        {{- toYaml . | nindent 8 }}
       {{- end }}
       ports:
         - protocol: UDP
