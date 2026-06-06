@@ -963,9 +963,6 @@ def _validate_plugin_module_sources(plugin_base: plugin_module._PluginBase) -> N
     for module_path in (plugin_base.tools_module_path, plugin_base.hooks_module_path, plugin_base.oauth_module_path):
         if module_path is None:
             continue
-        if not module_path.is_relative_to(plugin_base.root):
-            msg = f"Plugin module path {module_path} must be relative to plugin root {plugin_base.root}"
-            raise ToolMetadataValidationError(msg)
         try:
             ast.parse(module_path.read_text(encoding="utf-8"), filename=str(module_path))
         except (OSError, SyntaxError, UnicodeError) as exc:
@@ -1000,7 +997,7 @@ def _unavailable_plugin_metadata_without_execution(
     for plugin_base, plugin_entry, _ in plugin_bases:
         try:
             _validate_plugin_module_sources(plugin_base)
-        except Exception as exc:
+        except ToolMetadataValidationError as exc:
             if not tolerate_plugin_load_errors:
                 raise
             plugin_module._log_skipped_plugin_entry(plugin_entry.path, plugin_base.root, exc)

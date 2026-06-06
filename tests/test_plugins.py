@@ -209,7 +209,7 @@ def test_validate_with_runtime_does_not_mask_unexpected_tool_validation_type_err
     runtime_paths = _minimal_runtime_paths(tmp_path)
     message = "unexpected backend type error"
 
-    def _raise_type_error(_self: Config, _runtime_paths: object) -> None:
+    def _raise_type_error(_self: Config, _runtime_paths: object, **_kwargs: object) -> None:
         raise TypeError(message)
 
     monkeypatch.setattr(Config, "_validate_authored_tool_entries", _raise_type_error)
@@ -233,7 +233,7 @@ def test_validate_with_runtime_does_not_mask_unexpected_tool_validation_value_er
     runtime_paths = _minimal_runtime_paths(tmp_path)
     message = "unexpected backend value error"
 
-    def _raise_value_error(_self: Config, _runtime_paths: object) -> None:
+    def _raise_value_error(_self: Config, _runtime_paths: object, **_kwargs: object) -> None:
         raise ValueError(message)
 
     monkeypatch.setattr(Config, "_validate_authored_tool_entries", _raise_value_error)

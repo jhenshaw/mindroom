@@ -1073,14 +1073,11 @@ class Config(BaseModel):
             raise ConfigRuntimeValidationError(str(exc)) from exc
 
         try:
-            if tolerate_plugin_load_errors or not execute_plugin_modules_for_validation:
-                config._validate_authored_tool_entries(
-                    runtime_paths,
-                    tolerate_plugin_load_errors=tolerate_plugin_load_errors,
-                    execute_plugin_modules_for_validation=execute_plugin_modules_for_validation,
-                )
-            else:
-                config._validate_authored_tool_entries(runtime_paths)
+            config._validate_authored_tool_entries(
+                runtime_paths,
+                tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+                execute_plugin_modules_for_validation=execute_plugin_modules_for_validation,
+            )
         except (PluginValidationError, ToolConfigOverrideError, ToolMetadataValidationError) as exc:
             raise ConfigRuntimeValidationError(str(exc)) from exc
         return config

@@ -148,46 +148,28 @@ def _reject_duplicate_plugin_manifest_names(
 
 def _resolve_plugin_root(plugin_path: str, runtime_paths: RuntimePaths) -> Path:
     parsed_python_spec = _parse_python_plugin_spec(plugin_path)
-    if parsed_python_spec is not None and parsed_python_spec[2]:
+    if parsed_python_spec is not None:
         module_root = _resolve_python_plugin_root(plugin_path)
         if module_root is not None:
             return module_root
-        msg = f"Configured plugin module could not be resolved: {plugin_path}"
-        raise PluginValidationError(msg)
+        if parsed_python_spec[2]:
+            msg = f"Configured plugin module could not be resolved: {plugin_path}"
+            raise PluginValidationError(msg)
 
-    relative: Path | None = None
-    if parsed_python_spec is None:
-        try:
-            relative = validate_runtime_control_path(
-                plugin_path,
-                runtime_paths,
-                field_name="plugins[].path",
-            )
-        except ValueError as exc:
-            raise PluginValidationError(str(exc)) from exc
-        if relative.exists():
-            return relative
-
-    module_root = _resolve_python_plugin_root(plugin_path)
-    if module_root is not None:
-        return module_root
-
-    if relative is None:
-        try:
-            relative = validate_runtime_control_path(
-                plugin_path,
-                runtime_paths,
-                field_name="plugins[].path",
-            )
-        except ValueError as exc:
-            raise PluginValidationError(str(exc)) from exc
-    return relative
+    try:
+        return validate_runtime_control_path(
+            plugin_path,
+            runtime_paths,
+            field_name="plugins[].path",
+        )
+    except ValueError as exc:
+        raise PluginValidationError(str(exc)) from exc
 
 
-def _validate_plugin_child_path(root: Path, child_path: Path, *, kind: str) -> Path:
+def _validate_plugin_child_path(root: Path, child_path: Path, *, kind: str) -> None:
     resolved_root = root.resolve()
     if child_path.is_relative_to(resolved_root):
-        return child_path
+        return
     msg = f"Plugin {kind} path must stay under plugin root: {child_path}"
     raise PluginValidationError(msg)
 
