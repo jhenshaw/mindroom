@@ -1180,6 +1180,66 @@ class TestConfigCommandHandling:
         finally:
             config_path.unlink()
 
+    async def test_handle_config_show_redacts_secret_values(self) -> None:
+        """Config show should redact secret fields before sending Matrix-visible output."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            config_data = {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4", "api_key": "plain-config-secret"}},
+            }
+            yaml.dump(config_data, f)
+            config_path = Path(f.name)
+
+        try:
+            response, change_info = await handle_config_command("show", _runtime_paths_for_config(config_path))
+            assert change_info is None
+            assert "plain-config-secret" not in response
+            assert "***redacted***" in response
+        finally:
+            config_path.unlink()
+
+    async def test_handle_config_get_redacts_secret_values(self) -> None:
+        """Config get should redact secret fields before sending Matrix-visible output."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            config_data = {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4", "api_key": "plain-config-secret"}},
+            }
+            yaml.dump(config_data, f)
+            config_path = Path(f.name)
+
+        try:
+            response, change_info = await handle_config_command(
+                "get models.default.api_key",
+                _runtime_paths_for_config(config_path),
+            )
+            assert change_info is None
+            assert "plain-config-secret" not in response
+            assert "***redacted***" in response
+        finally:
+            config_path.unlink()
+
+    async def test_handle_config_set_preview_redacts_secret_values(self) -> None:
+        """Config set previews should keep raw values only in change_info, not Matrix-visible text."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            config_data = {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4", "api_key": "old-config-secret"}},
+            }
+            yaml.dump(config_data, f)
+            config_path = Path(f.name)
+
+        try:
+            response, change_info = await handle_config_command(
+                "set models.default.api_key new-config-secret",
+                _runtime_paths_for_config(config_path),
+            )
+            assert change_info is not None
+            assert change_info["old_value"] == "old-config-secret"
+            assert change_info["new_value"] == "new-config-secret"
+            assert "old-config-secret" not in response
+            assert "new-config-secret" not in response
+            assert "***redacted***" in response
+        finally:
+            config_path.unlink()
+
     async def test_handle_config_set(self) -> None:
         """Test handling config set command."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
