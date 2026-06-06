@@ -175,6 +175,11 @@ def validate_runtime_control_path(
     raise ValueError(msg)
 
 
+def stdio_command_uses_path(command: str) -> bool:
+    """Return whether an MCP stdio command is a path instead of a PATH lookup name."""
+    return "/" in command or "\\" in command or command.startswith((".", "~"))
+
+
 def _copy_process_env(process_env: dict[str, str] | None = None) -> dict[str, str]:
     if process_env is not None:
         return dict(process_env)

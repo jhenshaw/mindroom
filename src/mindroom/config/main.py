@@ -61,6 +61,7 @@ from mindroom.constants import (
     matrix_state_file,
     resolve_config_relative_path,
     runtime_matrix_homeserver,
+    stdio_command_uses_path,
     validate_runtime_control_path,
 )
 from mindroom.git_urls import credential_free_repo_url
@@ -77,6 +78,7 @@ from mindroom.mcp.config import MCPServerConfig, normalize_mcp_server_id
 from mindroom.prompt_templates import render_prompt_template, validate_prompt_template_fields
 from mindroom.prompts import PROMPT_DEFAULT_NAMES, PROMPT_DEFAULTS
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
+from mindroom.server_fetch_url import validate_server_fetch_url
 from mindroom.tool_system.plugin_imports import PluginValidationError
 from mindroom.tool_system.worker_routing import unsupported_shared_only_integration_names
 from mindroom.workspaces import validate_workspace_template_dir
@@ -375,11 +377,6 @@ def _raw_tools_entries(data: dict[object, object], section: str) -> list[object]
     section_data = cast("dict[object, object]", raw_section)
     tools = section_data.get("tools")
     return list(tools) if isinstance(tools, list) else []
-
-
-def _stdio_command_uses_path(command: str) -> bool:
-    """Return whether an MCP stdio command is a path instead of a PATH lookup name."""
-    return "/" in command or "\\" in command or command.startswith((".", "~"))
 
 
 class Config(BaseModel):
@@ -1097,20 +1094,21 @@ class Config(BaseModel):
                 field_name=f"knowledge_bases.{base_id}.path",
             )
         for server_id, server_config in self.mcp_servers.items():
-            if server_config.transport != "stdio":
-                continue
-            if server_config.cwd is not None:
-                validate_runtime_control_path(
-                    server_config.cwd,
-                    runtime_paths,
-                    field_name=f"mcp_servers.{server_id}.cwd",
-                )
-            if server_config.command is not None and _stdio_command_uses_path(server_config.command):
-                validate_runtime_control_path(
-                    server_config.command,
-                    runtime_paths,
-                    field_name=f"mcp_servers.{server_id}.command",
-                )
+            if server_config.transport == "stdio":
+                if server_config.cwd is not None:
+                    validate_runtime_control_path(
+                        server_config.cwd,
+                        runtime_paths,
+                        field_name=f"mcp_servers.{server_id}.cwd",
+                    )
+                if server_config.command is not None and stdio_command_uses_path(server_config.command):
+                    validate_runtime_control_path(
+                        server_config.command,
+                        runtime_paths,
+                        field_name=f"mcp_servers.{server_id}.command",
+                    )
+            elif server_config.url is not None:
+                validate_server_fetch_url(server_config.url)
 
     def authored_model_dump(self) -> dict[str, Any]:
         """Serialize authored config."""

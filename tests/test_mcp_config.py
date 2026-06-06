@@ -154,6 +154,24 @@ def test_config_rejects_mcp_stdio_cwd_escape(tmp_path: Path) -> None:
         )
 
 
+def test_config_rejects_remote_mcp_private_url_at_validation_time(tmp_path: Path) -> None:
+    """Remote MCP URLs should be rejected before a malicious URL can be persisted."""
+    runtime_paths = _runtime_paths(tmp_path)
+    with pytest.raises(ConfigRuntimeValidationError, match="URL is not allowed for server-side fetching"):
+        Config.validate_with_runtime(
+            {
+                "mcp_servers": {
+                    "demo": {
+                        "transport": "sse",
+                        "url": "http://127.0.0.1:8000/sse",
+                    },
+                },
+                "agents": {},
+            },
+            runtime_paths,
+        )
+
+
 def test_config_rejects_knowledge_path_escape(tmp_path: Path) -> None:
     """Knowledge base roots should stay under runtime-owned roots."""
     runtime_paths = _runtime_paths(tmp_path)
@@ -200,7 +218,7 @@ def test_config_allows_oauth_mcp_tools_on_user_scoped_agents(tmp_path: Path) -> 
             "mcp_servers": {
                 "demo": {
                     "transport": "streamable-http",
-                    "url": "https://mcp.example.test/mcp",
+                    "url": "https://8.8.8.8/mcp",
                     "auth": {
                         "type": "oauth",
                         "discovery": "manual",

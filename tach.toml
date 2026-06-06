@@ -1077,6 +1077,7 @@ depends_on = [
     "mindroom.mcp.config",
     "mindroom.prompt_templates",
     "mindroom.prompts",
+    "mindroom.server_fetch_url",
     "mindroom.tool_system.catalog",
     "mindroom.tool_system.plugin_imports",
     "mindroom.tool_system.worker_routing",

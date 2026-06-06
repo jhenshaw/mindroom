@@ -963,6 +963,9 @@ def _validate_plugin_module_sources(plugin_base: plugin_module._PluginBase) -> N
     for module_path in (plugin_base.tools_module_path, plugin_base.hooks_module_path, plugin_base.oauth_module_path):
         if module_path is None:
             continue
+        if not module_path.is_relative_to(plugin_base.root):
+            msg = f"Plugin module path {module_path} must be relative to plugin root {plugin_base.root}"
+            raise ToolMetadataValidationError(msg)
         try:
             ast.parse(module_path.read_text(encoding="utf-8"), filename=str(module_path))
         except (OSError, SyntaxError, UnicodeError) as exc:
@@ -990,8 +993,9 @@ def _unavailable_plugin_metadata_without_execution(
     plugin_bases: list[tuple[plugin_module._PluginBase, Any, int]],
     *,
     tolerate_plugin_load_errors: bool,
-) -> dict[str, ToolMetadata]:
-    """Return literal plugin tool metadata after parsing sources without executing modules."""
+) -> tuple[dict[str, ToolMetadata], dict[str, ToolMetadata]]:
+    """Return plugin metadata split into skipped-execution declarations and real failures."""
+    declared_tool_metadata: dict[str, ToolMetadata] = {}
     unavailable_tool_metadata: dict[str, ToolMetadata] = {}
     for plugin_base, plugin_entry, _ in plugin_bases:
         try:
@@ -1000,8 +1004,10 @@ def _unavailable_plugin_metadata_without_execution(
             if not tolerate_plugin_load_errors:
                 raise
             plugin_module._log_skipped_plugin_entry(plugin_entry.path, plugin_base.root, exc)
-        unavailable_tool_metadata.update(_unavailable_tool_metadata_from_failed_plugin(plugin_base, {}))
-    return unavailable_tool_metadata
+            unavailable_tool_metadata.update(_unavailable_tool_metadata_from_failed_plugin(plugin_base, {}))
+            continue
+        declared_tool_metadata.update(_declared_tool_metadata_from_plugin_sources(plugin_base))
+    return declared_tool_metadata, unavailable_tool_metadata
 
 
 def _resolved_tool_state_without_plugin_execution(
@@ -1012,10 +1018,11 @@ def _resolved_tool_state_without_plugin_execution(
 ) -> _ResolvedToolState:
     """Return validation metadata for plugins without importing or executing plugin code."""
     resolved_state = _builtin_tool_state_with_mcp(config)
-    unavailable_tool_metadata = _unavailable_plugin_metadata_without_execution(
+    declared_tool_metadata, unavailable_tool_metadata = _unavailable_plugin_metadata_without_execution(
         plugin_bases,
         tolerate_plugin_load_errors=tolerate_plugin_load_errors,
     )
+    resolved_state.tool_metadata.update(declared_tool_metadata)
     unavailable_tool_metadata = _unavailable_tool_metadata_without_resolved_tools(
         unavailable_tool_metadata,
         resolved_state.tool_registry,
@@ -1210,6 +1217,15 @@ def _declared_tool_metadata_from_broken_plugin_source(module_path: Path) -> dict
             description=_literal_string_keyword(node, "description") or "Unavailable plugin tool",
             category=ToolCategory.INTEGRATIONS,
         )
+    return metadata_by_name
+
+
+def _declared_tool_metadata_from_plugin_sources(plugin_base: plugin_module._PluginBase) -> dict[str, ToolMetadata]:
+    """Return literal tool declarations from plugin sources that were parsed but not executed."""
+    metadata_by_name: dict[str, ToolMetadata] = {}
+    for module_path in (plugin_base.tools_module_path, plugin_base.hooks_module_path):
+        if module_path is not None:
+            metadata_by_name.update(_declared_tool_metadata_from_broken_plugin_source(module_path))
     return metadata_by_name
 
 

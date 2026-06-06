@@ -184,6 +184,14 @@ def _resolve_plugin_root(plugin_path: str, runtime_paths: RuntimePaths) -> Path:
     return relative
 
 
+def _validate_plugin_child_path(root: Path, child_path: Path, *, kind: str) -> Path:
+    resolved_root = root.resolve()
+    if child_path.is_relative_to(resolved_root):
+        return child_path
+    msg = f"Plugin {kind} path must stay under plugin root: {child_path}"
+    raise PluginValidationError(msg)
+
+
 def _resolve_python_plugin_root(plugin_path: str) -> Path | None:
     parsed = _parse_python_plugin_spec(plugin_path)
     if parsed is None:
@@ -345,6 +353,7 @@ def _resolve_module_path(root: Path, module_path: str | None, *, kind: str) -> P
     if not module_path:
         return None
     resolved_path = (root / module_path).resolve()
+    _validate_plugin_child_path(root, resolved_path, kind=f"{kind} module")
     if not resolved_path.exists() or not resolved_path.is_file():
         msg = f"Plugin {kind} module not found: {resolved_path}"
         logger.error("Plugin module not found", kind=kind, path=str(resolved_path))
@@ -356,6 +365,7 @@ def _resolve_skill_dirs(root: Path, skills: list[str]) -> list[Path]:
     skill_dirs: list[Path] = []
     for relative_path in skills:
         path = (root / relative_path).resolve()
+        _validate_plugin_child_path(root, path, kind="skill")
         if not path.exists() or not path.is_dir():
             msg = f"Plugin skill path is not a directory: {path}"
             logger.error("Plugin skill path is not a directory", path=str(path))

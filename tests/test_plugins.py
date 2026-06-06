@@ -1950,8 +1950,14 @@ def test_validate_with_runtime_can_skip_plugin_module_execution(tmp_path: Path) 
             runtime_paths,
             execute_plugin_modules_for_validation=False,
         )
+        validation_snapshot = metadata_module.resolved_tool_validation_snapshot_for_runtime(
+            runtime_paths,
+            config,
+            execute_plugin_modules=False,
+        )
 
-    assert "no_exec_tool" not in config.get_agent_available_tools("assistant")
+    assert "no_exec_tool" in config.get_agent_available_tools("assistant")
+    assert validation_snapshot["no_exec_tool"].unavailable_due_to_plugin_load_error is False
     assert not marker_path.exists()
 
 
@@ -1966,6 +1972,30 @@ def test_validate_with_runtime_rejects_local_plugin_path_escape(tmp_path: Path) 
     }
 
     with pytest.raises(ConfigRuntimeValidationError, match=r"plugins\[\]\.path must stay"):
+        Config.validate_with_runtime(
+            payload,
+            runtime_paths,
+            execute_plugin_modules_for_validation=False,
+        )
+
+
+def test_validate_with_runtime_rejects_plugin_manifest_module_path_escape(tmp_path: Path) -> None:
+    """Plugin manifest module paths should stay under their validated plugin root."""
+    plugin_root = tmp_path / "plugins" / "escape"
+    plugin_root.mkdir(parents=True)
+    (tmp_path / "outside_tools.py").write_text("x = 1\n", encoding="utf-8")
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "escape_plugin", "tools_module": "../outside_tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    runtime_paths = _minimal_runtime_paths(tmp_path)
+    payload = {
+        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+        "agents": {},
+        "plugins": ["./plugins/escape"],
+    }
+
+    with pytest.raises(ConfigRuntimeValidationError, match="must stay under plugin root"):
         Config.validate_with_runtime(
             payload,
             runtime_paths,
