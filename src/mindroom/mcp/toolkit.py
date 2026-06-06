@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any, cast
+from copy import deepcopy
+from typing import TYPE_CHECKING, Any
 
 from agno.tools import Toolkit
 from agno.tools.function import Function
@@ -77,23 +78,14 @@ def _frame_mcp_schema_description(server_id: str, remote_name: str, description:
     )
 
 
-def _frame_mcp_schema_descriptions(server_id: str, remote_name: str, value: object) -> object:
-    if isinstance(value, dict):
-        framed: dict[str, object] = {}
-        for key, item in cast("dict[str, object]", value).items():
-            if key == "description" and isinstance(item, str):
-                framed[key] = _frame_mcp_schema_description(server_id, remote_name, item)
-                continue
-            framed[key] = _frame_mcp_schema_descriptions(server_id, remote_name, item)
-        return framed
-    if isinstance(value, list):
-        return [_frame_mcp_schema_descriptions(server_id, remote_name, item) for item in value]
-    return value
-
-
 def _frame_mcp_tool_schema(server_id: str, remote_name: str, schema: dict[str, Any]) -> dict[str, Any]:
-    framed = _frame_mcp_schema_descriptions(server_id, remote_name, schema)
-    return cast("dict[str, Any]", framed)
+    framed = deepcopy(schema)
+    description = framed.get("description")
+    if isinstance(description, str):
+        framed["description"] = _frame_mcp_schema_description(server_id, remote_name, description)
+    else:
+        framed["description"] = _frame_mcp_schema_description(server_id, remote_name, "No schema description provided.")
+    return framed
 
 
 class MindRoomMCPToolkit(Toolkit):

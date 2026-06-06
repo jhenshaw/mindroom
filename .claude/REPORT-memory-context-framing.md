@@ -81,7 +81,14 @@ Broader relevant subset:
 /tmp/codex-uv/bin/uv run pytest -n auto --no-cov tests/test_memory_facade.py tests/test_memory_file_backend.py tests/test_mcp_results.py tests/test_mcp_toolkit.py tests/test_mcp_manager.py tests/test_delegate_tools.py tests/test_subagents.py
 ```
 
-Result on isolated branch after final formatting/type cleanup: 213 passed.
+Result on isolated branch after review follow-up: 214 passed.
+
+Review follow-up:
+
+- malformed `memory` payload text now renders as empty data instead of crashing;
+- metadata `line` type check now uses a normal `(int, str)` tuple;
+- memory trust boundary is rendered at the `{memory_lines}` insertion point instead of after the first rendered newline;
+- MCP schemas now get one schema-level trust-boundary description instead of recursively prefixing every nested field description.
 
 Pre-commit:
 
@@ -94,7 +101,7 @@ The exact blocker was `/run/current-system/sw/bin/bash: line 1: bun: command not
 
 ## Residual Risk
 
-MCP schemas are copied and framed recursively for `description` fields, but arbitrary non-description schema strings can still contain untrusted text.
-They are covered by the bridge-level `trust_boundary` and function description boundary.
+MCP schemas are copied and framed once at schema level, so arbitrary nested schema strings can still contain untrusted text.
+They are covered by the schema-level boundary, bridge-level `trust_boundary`, and function description boundary.
 
 Full repository pytest was not run because task requested focused pytest.

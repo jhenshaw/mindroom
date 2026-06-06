@@ -39,7 +39,7 @@ def _memory_source_label(memory: MemoryResult) -> str:
         if isinstance(source_file, str) and source_file:
             source = f"{source}:{source_file}"
             line = metadata.get("line")
-            if isinstance(line, int | str) and not isinstance(line, bool) and str(line).strip():
+            if isinstance(line, (int, str)) and not isinstance(line, bool) and str(line).strip():
                 source = f"{source}:{line}"
 
     labels = [f"source={source}"]
@@ -50,17 +50,9 @@ def _memory_source_label(memory: MemoryResult) -> str:
 
 
 def _format_memory_line(memory: MemoryResult) -> str:
-    text = _normalized_inline_text(memory.get("memory", ""))
+    raw_text = memory.get("memory")
+    text = _normalized_inline_text(raw_text) if isinstance(raw_text, str) else ""
     return f"- [{_memory_source_label(memory)}] data: {text}"
-
-
-def _insert_untrusted_boundary(rendered_context: str) -> str:
-    first_newline = rendered_context.find("\n")
-    if first_newline == -1:
-        return f"{_MEMORY_UNTRUSTED_BOUNDARY}\n{rendered_context}"
-    return (
-        f"{rendered_context[: first_newline + 1]}{_MEMORY_UNTRUSTED_BOUNDARY}\n{rendered_context[first_newline + 1 :]}"
-    )
 
 
 def format_memories_as_context(
@@ -73,9 +65,9 @@ def format_memories_as_context(
     if not memories:
         return ""
 
-    memory_lines = "\n".join(_format_memory_line(memory) for memory in memories)
-    rendered_context = render_prompt_template(prompt_template, context_type=context_type, memory_lines=memory_lines)
-    return _insert_untrusted_boundary(rendered_context)
+    rendered_memory_lines = "\n".join(_format_memory_line(memory) for memory in memories)
+    memory_lines = f"{_MEMORY_UNTRUSTED_BOUNDARY}\n{rendered_memory_lines}"
+    return render_prompt_template(prompt_template, context_type=context_type, memory_lines=memory_lines)
 
 
 def format_file_memory_entrypoint_context(*, header: str, entrypoint: str) -> str:
