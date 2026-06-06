@@ -67,8 +67,11 @@ spec:
     - port: {{ $workerPort }}
   # Allow DNS
   {{- if $dnsEnabled }}
-  - to:
+  -
+    {{- with $dns.to }}
+    to:
     {{- toYaml $dns.to | nindent 4 }}
+    {{- end }}
     ports:
     - protocol: UDP
       port: 53

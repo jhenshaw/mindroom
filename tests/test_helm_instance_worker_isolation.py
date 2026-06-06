@@ -201,7 +201,7 @@ def test_instance_chart_network_policy_restricts_public_egress_to_safe_cidr() ->
 
 
 def test_instance_chart_network_policy_can_override_public_egress_exceptions(tmp_path: Path) -> None:
-    """Operators should be able to tighten public egress CIDR exceptions per cluster."""
+    """Operators should be able to replace the default public egress CIDR exception list."""
     values_path = tmp_path / "instance-network-policy-values.yaml"
     values_path.write_text(
         """
@@ -251,6 +251,32 @@ networkPolicy:
         any(peer.get("ipBlock", {}).get("cidr") == "0.0.0.0/0" for peer in rule.get("to", []))
         for rule in policy["spec"]["egress"]
     )
+
+
+def test_instance_chart_network_policy_allows_dns_without_peer_selector(tmp_path: Path) -> None:
+    """Operators should be able to omit DNS peers without rendering to: null."""
+    values_path = tmp_path / "instance-network-policy-dns-values.yaml"
+    values_path.write_text(
+        """
+networkPolicy:
+  dns:
+    enabled: true
+    to: null
+""",
+        encoding="utf-8",
+    )
+    docs = _render_chart(
+        Path("cluster/k8s/instance"),
+        "workerBackend=kubernetes",
+        "storageAccessMode=ReadWriteMany",
+        values_files=(values_path,),
+    )
+    policy = _resource(docs, "NetworkPolicy", "instance-traffic-controls-demo")
+    dns_rule = next(
+        rule for rule in policy["spec"]["egress"] if {port.get("port") for port in rule.get("ports", [])} == {53}
+    )
+
+    assert "to" not in dns_rule
 
 
 def test_instance_chart_network_policy_renders_worker_and_control_plane_extra_egress(tmp_path: Path) -> None:
@@ -882,6 +908,36 @@ workers:
         "to": [{"podSelector": {"matchLabels": {"app": "agent-vault-bridge"}}}],
         "ports": [{"protocol": "TCP", "port": 18080}],
     } in policy["spec"]["egress"]
+
+
+def test_runtime_chart_worker_network_policy_allows_dns_without_peer_selector(tmp_path: Path) -> None:
+    """Operators should be able to omit DNS peers without rendering to: null."""
+    values_path = tmp_path / "runtime-network-policy-dns-values.yaml"
+    values_path.write_text(
+        """
+workers:
+  kubernetes:
+    networkPolicy:
+      dns:
+        enabled: true
+        to: null
+""",
+        encoding="utf-8",
+    )
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        "workers.backend=kubernetes",
+        "workers.sandbox.proxyToken.value=test-token",
+        "eventCache.postgres.auth.password=test-password",
+        release_name="mindroom-runtime",
+        values_files=(values_path,),
+    )
+    policy = _resource(docs, "NetworkPolicy", "mindroom-runtime-workers")
+    dns_rule = next(
+        rule for rule in policy["spec"]["egress"] if {port.get("port") for port in rule.get("ports", [])} == {53}
+    )
+
+    assert "to" not in dns_rule
 
 
 def test_runtime_chart_disables_service_links_for_dynamic_worker_pods_by_default() -> None:

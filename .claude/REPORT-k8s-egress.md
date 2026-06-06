@@ -34,10 +34,10 @@ Passed.
 
 ```bash
 /Users/bas.nijholt/.codex/worktrees/c31e/mindroom/.venv/bin/pytest tests/test_helm_instance_worker_isolation.py -k "network_policy or egress" -n 0 --no-cov -v
-# 9 passed, 30 deselected
+# 11 passed, 30 deselected
 
 /Users/bas.nijholt/.codex/worktrees/c31e/mindroom/.venv/bin/pytest tests/test_helm_instance_worker_isolation.py -n 0 --no-cov -v
-# 39 passed
+# 41 passed
 
 helm lint cluster/k8s/instance && helm lint cluster/k8s/runtime
 # 2 charts linted, 0 charts failed

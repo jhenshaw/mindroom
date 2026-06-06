@@ -54,8 +54,11 @@ spec:
         - protocol: TCP
           port: {{ .Values.runtime.apiPort }}
     {{- if $dnsEnabled }}
-    - to:
+    -
+      {{- with $dns.to }}
+      to:
         {{- toYaml $dns.to | nindent 8 }}
+      {{- end }}
       ports:
         - protocol: UDP
           port: 53
