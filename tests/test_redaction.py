@@ -16,6 +16,7 @@ def test_redact_sensitive_data_redacts_nested_dicts_lists_and_header_variants() 
         },
         "tokens": [
             {"access_token": "access-secret"},
+            {"apiToken": "api-token-secret"},
             {"refreshToken": "refresh-secret"},
             {"id-token": "id-secret"},
             {"client_secret": "client-secret"},
@@ -32,6 +33,7 @@ def test_redact_sensitive_data_redacts_nested_dicts_lists_and_header_variants() 
         },
         "tokens": [
             {"access_token": REDACTED},
+            {"apiToken": REDACTED},
             {"refreshToken": REDACTED},
             {"id-token": REDACTED},
             {"client_secret": REDACTED},
@@ -132,3 +134,86 @@ def test_redact_sensitive_data_tolerates_malformed_ipv6_url() -> None:
     message = redacted["message"]
     assert isinstance(message, str)
     assert "http://[" in message
+
+
+def test_redact_sensitive_data_uses_context_for_bare_values_in_secret_lists() -> None:
+    """List items under a secret-bearing key should be redacted without changing container shape."""
+    redacted = redact_sensitive_data(
+        {
+            "api_keys": ["plain-secret-one", "plain-secret-two"],
+            "oauth_tokens": ["plain-oauth-token"],
+            "max_tokens": 4096,
+            "next_token": "cursor-value",
+            "usage": {
+                "cache_creation_input_tokens": 2,
+                "cache_read_input_tokens": 3,
+                "input_tokens": 4,
+                "output_tokens": 5,
+            },
+            "has_credentials": True,
+            "show_passwords": False,
+            "num_secrets": 2,
+            "backup_credentials": ["plain-backup-secret"],
+            "nested": {"tokens": [{"value": "plain-token"}]},
+            "safe_values": ["plain-secret-one"],
+        },
+    )
+
+    assert redacted == {
+        "api_keys": [REDACTED, REDACTED],
+        "oauth_tokens": [REDACTED],
+        "max_tokens": 4096,
+        "next_token": "cursor-value",
+        "usage": {
+            "cache_creation_input_tokens": 2,
+            "cache_read_input_tokens": 3,
+            "input_tokens": 4,
+            "output_tokens": 5,
+        },
+        "has_credentials": True,
+        "show_passwords": False,
+        "num_secrets": 2,
+        "backup_credentials": [REDACTED],
+        "nested": {"tokens": [{"value": REDACTED}]},
+        "safe_values": ["plain-secret-one"],
+    }
+
+
+def test_redact_sensitive_data_redacts_value_fields_named_by_sibling_secret_keys() -> None:
+    """Key/value style containers should redact bare values when the sibling name is secret-like."""
+    redacted = redact_sensitive_data(
+        {
+            "environment": [
+                {"name": "OPENAI_API_KEY", "value": "plain-openai-secret"},
+                {"key": "client_secret", "value": "plain-client-secret"},
+                {"name": "mode", "value": "safe"},
+            ],
+            "headers": [{"name": "Authorization", "value": "plain-auth-secret"}],
+        },
+    )
+
+    assert redacted == {
+        "environment": [
+            {"name": "OPENAI_API_KEY", "value": REDACTED},
+            {"key": "client_secret", "value": REDACTED},
+            {"name": "mode", "value": "safe"},
+        ],
+        "headers": [{"name": "Authorization", "value": REDACTED}],
+    }
+
+
+def test_redact_sensitive_data_keeps_values_for_non_schema_label_keys() -> None:
+    """Field/parameter/variable labels should not force-redact harmless values."""
+    redacted = redact_sensitive_data(
+        [
+            {"field": "password_policy", "value": "min length 12"},
+            {"parameter": "client_secret_required", "value": False},
+            {"variable": "secret_sauce_recipe", "value": "tomatoes"},
+        ],
+    )
+
+    assert redacted == [
+        {"field": "password_policy", "value": "min length 12"},
+        {"parameter": "client_secret_required", "value": False},
+        {"variable": "secret_sauce_recipe", "value": "tomatoes"},
+    ]
