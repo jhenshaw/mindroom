@@ -7,11 +7,11 @@ import importlib
 import json
 import secrets
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Annotated, Any, Protocol, cast
 from urllib.parse import quote, unquote, urlencode, urlsplit
 
 import jwt
-from fastapi import APIRouter, FastAPI, Header, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
 from jwt import PyJWKClient, PyJWTError
 from pydantic import BaseModel
@@ -873,10 +873,9 @@ def _dashboard_auth_configured(auth_state: ApiAuthState) -> bool:
 
 async def verify_write_user(
     request: Request,
-    authorization: str | None = Header(None),
+    auth_user: Annotated[dict[str, Any], Depends(verify_user)],
 ) -> dict[str, Any]:
     """Validate API write auth and fail closed when dashboard auth is not configured."""
-    auth_user = await verify_user(request, authorization)
     auth_state = _request_auth_state(request)
     if _dashboard_auth_configured(auth_state):
         return auth_user
