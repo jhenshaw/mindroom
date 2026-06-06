@@ -13,6 +13,8 @@ from mcp.client.stdio import StdioServerParameters, get_default_environment, std
 from mcp.client.streamable_http import streamablehttp_client
 from mcp.shared.message import SessionMessage
 
+from mindroom.server_fetch_url import validate_server_fetch_url
+
 _ENV_REFERENCE_PATTERN = re.compile(r"\$\{([^}]+)\}")
 
 if TYPE_CHECKING:
@@ -100,12 +102,13 @@ async def _open_remote_transport(
     if server_config.url is None:
         msg = f"{transport} MCP servers require url"
         raise ValueError(msg)
+    url = validate_server_fetch_url(server_config.url)
     headers = {
         **_interpolate_mcp_headers(server_config.headers, runtime_paths),
         **(dict(extra_headers) if extra_headers is not None else {}),
     }
     async with client(
-        server_config.url,
+        url,
         headers=headers,
         timeout=server_config.startup_timeout_seconds,
         sse_read_timeout=server_config.call_timeout_seconds,
