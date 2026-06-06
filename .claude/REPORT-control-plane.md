@@ -1,7 +1,7 @@
 # Control Plane Safety Report
 
 Branch: `security/control-plane-boundary-4`.
-Base: `origin/main` at `c24f3cd05`, including PR #1176 where `!config` is disabled by default.
+Base: `origin/main` at `952ae960e`, including PR #1176 where `!config` is disabled by default and PR #1177 where SaaS auth privilege leaks were fixed.
 
 ## Scope
 

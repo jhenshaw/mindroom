@@ -615,7 +615,6 @@ def _set_config_generation_header(response: Response, generation: int) -> None:
 
 # Include routers
 app.include_router(auth_router)
-app.state.verify_write_user = verify_write_user
 app.include_router(credentials_router, dependencies=[Depends(verify_user)])
 app.include_router(homeassistant_router, dependencies=[Depends(verify_user)])
 app.include_router(integrations_router, dependencies=[Depends(verify_user)])

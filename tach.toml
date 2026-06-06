@@ -563,6 +563,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.skills"
 depends_on = [
+    "mindroom.api.auth",
     "mindroom.constants",
     "mindroom.tool_system.skills",
 ]

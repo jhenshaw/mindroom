@@ -7,9 +7,10 @@ import shutil
 from typing import Annotated, Any
 
 import yaml
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from mindroom.api.auth import verify_write_user
 from mindroom.constants import safe_replace
 from mindroom.tool_system.skills import get_user_skills_dir, list_skill_listings, resolve_skill_listing, skill_can_edit
 
@@ -44,14 +45,6 @@ class SkillUpdateRequest(BaseModel):
     """Request payload for updating a skill."""
 
     content: str
-
-
-async def verify_skills_write_user(
-    request: Request,
-    authorization: str | None = Header(None),
-) -> dict[str, Any]:
-    """Delegate skills write auth to the API composition root."""
-    return await request.app.state.verify_write_user(request, authorization)
 
 
 @router.get("")
@@ -94,7 +87,7 @@ async def get_skill(skill_name: str) -> SkillDetail:
 async def update_skill(
     skill_name: str,
     payload: SkillUpdateRequest,
-    _user: Annotated[dict, Depends(verify_skills_write_user)],
+    _user: Annotated[dict[str, Any], Depends(verify_write_user)],
 ) -> dict[str, bool]:
     """Update a skill's SKILL.md content."""
     listing = resolve_skill_listing(skill_name)
@@ -117,7 +110,7 @@ async def update_skill(
 @router.post("")
 async def create_skill(
     payload: CreateSkillRequest,
-    _user: Annotated[dict, Depends(verify_skills_write_user)],
+    _user: Annotated[dict[str, Any], Depends(verify_write_user)],
 ) -> SkillSummary:
     """Create a new user skill."""
     name = payload.name.strip()
@@ -149,7 +142,7 @@ async def create_skill(
 @router.delete("/{skill_name}")
 async def delete_skill(
     skill_name: str,
-    _user: Annotated[dict, Depends(verify_skills_write_user)],
+    _user: Annotated[dict[str, Any], Depends(verify_write_user)],
 ) -> dict[str, bool]:
     """Delete a user skill."""
     listing = resolve_skill_listing(skill_name)
