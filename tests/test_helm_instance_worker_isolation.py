@@ -177,6 +177,139 @@ def test_instance_chart_network_policy_limits_public_ports_to_ingress_and_instan
     ]
 
 
+def test_instance_chart_network_policy_restricts_public_egress_to_safe_cidr() -> None:
+    """Instance egress should not allow bare any-destination HTTP/HTTPS."""
+    docs = _render_instance_chart()
+    policy = _resource(docs, "NetworkPolicy", "instance-traffic-controls-demo")
+    egress_rules = policy["spec"]["egress"]
+    public_rule = next(
+        rule
+        for rule in egress_rules
+        if any(peer.get("ipBlock", {}).get("cidr") == "0.0.0.0/0" for peer in rule.get("to", []))
+    )
+
+    assert {port["port"] for port in public_rule["ports"]} == {80, 443}
+    assert set(public_rule["to"][0]["ipBlock"]["except"]) >= {
+        "10.0.0.0/8",
+        "169.254.0.0/16",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+    }
+    assert not any(
+        {port.get("port") for port in rule.get("ports", [])} == {80, 443} and "to" not in rule for rule in egress_rules
+    )
+
+
+def test_instance_chart_network_policy_can_override_public_egress_exceptions(tmp_path: Path) -> None:
+    """Operators should be able to tighten public egress CIDR exceptions per cluster."""
+    values_path = tmp_path / "instance-network-policy-values.yaml"
+    values_path.write_text(
+        """
+networkPolicy:
+  publicInternet:
+    except:
+      - 169.254.169.254/32
+""",
+        encoding="utf-8",
+    )
+    docs = _render_chart(
+        Path("cluster/k8s/instance"),
+        "workerBackend=kubernetes",
+        "storageAccessMode=ReadWriteMany",
+        values_files=(values_path,),
+    )
+    policy = _resource(docs, "NetworkPolicy", "instance-traffic-controls-demo")
+    public_rule = next(
+        rule
+        for rule in policy["spec"]["egress"]
+        if any(peer.get("ipBlock", {}).get("cidr") == "0.0.0.0/0" for peer in rule.get("to", []))
+    )
+
+    assert public_rule["to"][0]["ipBlock"]["except"] == ["169.254.169.254/32"]
+
+
+def test_instance_chart_network_policy_can_disable_public_egress(tmp_path: Path) -> None:
+    """Boolean values should be honored when operators disable direct public egress."""
+    values_path = tmp_path / "instance-network-policy-disabled-values.yaml"
+    values_path.write_text(
+        """
+networkPolicy:
+  publicInternet:
+    enabled: false
+""",
+        encoding="utf-8",
+    )
+    docs = _render_chart(
+        Path("cluster/k8s/instance"),
+        "workerBackend=kubernetes",
+        "storageAccessMode=ReadWriteMany",
+        values_files=(values_path,),
+    )
+    policy = _resource(docs, "NetworkPolicy", "instance-traffic-controls-demo")
+
+    assert not any(
+        any(peer.get("ipBlock", {}).get("cidr") == "0.0.0.0/0" for peer in rule.get("to", []))
+        for rule in policy["spec"]["egress"]
+    )
+
+
+def test_instance_chart_network_policy_renders_worker_and_control_plane_extra_egress(tmp_path: Path) -> None:
+    """Broker and API-server egress should be source-scoped instead of broadening every pod."""
+    values_path = tmp_path / "instance-extra-egress-values.yaml"
+    values_path.write_text(
+        """
+networkPolicy:
+  workerExtraEgress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: agent-vault-bridge
+      ports:
+        - protocol: TCP
+          port: 18080
+  controlPlaneExtraEgress:
+    - to:
+        - ipBlock:
+            cidr: 10.0.0.1/32
+      ports:
+        - protocol: TCP
+          port: 443
+""",
+        encoding="utf-8",
+    )
+    docs = _render_chart(
+        Path("cluster/k8s/instance"),
+        "workerBackend=kubernetes",
+        "storageAccessMode=ReadWriteMany",
+        values_files=(values_path,),
+    )
+    worker_policy = _resource(docs, "NetworkPolicy", "instance-worker-egress-demo")
+    control_plane_policy = _resource(docs, "NetworkPolicy", "instance-control-plane-egress-demo")
+
+    assert worker_policy["spec"]["podSelector"]["matchLabels"] == {
+        "customer": "demo",
+        "mindroom.ai/component": "worker",
+        "app.kubernetes.io/managed-by": "mindroom",
+        "app.kubernetes.io/name": "mindroom-worker",
+    }
+    assert worker_policy["spec"]["egress"] == [
+        {
+            "to": [{"podSelector": {"matchLabels": {"app": "agent-vault-bridge"}}}],
+            "ports": [{"protocol": "TCP", "port": 18080}],
+        },
+    ]
+    assert control_plane_policy["spec"]["podSelector"]["matchLabels"] == {
+        "app": "mindroom",
+        "customer": "demo",
+    }
+    assert control_plane_policy["spec"]["egress"] == [
+        {
+            "to": [{"ipBlock": {"cidr": "10.0.0.1/32"}}],
+            "ports": [{"protocol": "TCP", "port": 443}],
+        },
+    ]
+
+
 def test_instance_chart_disables_service_links_for_dynamic_worker_pods_by_default() -> None:
     """The control plane should configure generated worker pod specs with service links disabled."""
     docs = _render_instance_chart()
@@ -674,6 +807,81 @@ def test_runtime_chart_worker_network_policy_selects_dynamic_worker_labels() -> 
         "app.kubernetes.io/managed-by": "mindroom",
         "app.kubernetes.io/name": "mindroom-worker",
     }
+
+
+def test_runtime_chart_worker_network_policy_restricts_worker_egress() -> None:
+    """Dedicated workers should get egress default-deny with explicit allow rules."""
+    docs = _render_runtime_chart()
+    policy = _resource(docs, "NetworkPolicy", "mindroom-runtime-workers")
+
+    assert policy["spec"]["policyTypes"] == ["Ingress", "Egress"]
+    runtime_rule = next(
+        rule for rule in policy["spec"]["egress"] if any(port.get("port") == 8765 for port in rule.get("ports", []))
+    )
+    public_rule = next(
+        rule
+        for rule in policy["spec"]["egress"]
+        if any(peer.get("ipBlock", {}).get("cidr") == "0.0.0.0/0" for peer in rule.get("to", []))
+    )
+
+    assert runtime_rule["to"] == [
+        {
+            "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "default"}},
+            "podSelector": {
+                "matchLabels": {
+                    "app.kubernetes.io/name": "mindroom-runtime",
+                    "app.kubernetes.io/instance": "mindroom-runtime",
+                    "app.kubernetes.io/component": "runtime",
+                },
+            },
+        },
+    ]
+    assert {port["port"] for port in public_rule["ports"]} == {80, 443}
+    assert set(public_rule["to"][0]["ipBlock"]["except"]) >= {
+        "10.0.0.0/8",
+        "169.254.0.0/16",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+    }
+    assert not any(
+        {port.get("port") for port in rule.get("ports", [])} == {80, 443} and "to" not in rule
+        for rule in policy["spec"]["egress"]
+    )
+
+
+def test_runtime_chart_worker_network_policy_renders_extra_broker_egress(tmp_path: Path) -> None:
+    """Runtime chart workers should have configurable private broker egress."""
+    values_path = tmp_path / "runtime-extra-egress-values.yaml"
+    values_path.write_text(
+        """
+workers:
+  kubernetes:
+    networkPolicy:
+      extraEgress:
+        - to:
+            - podSelector:
+                matchLabels:
+                  app: agent-vault-bridge
+          ports:
+            - protocol: TCP
+              port: 18080
+""",
+        encoding="utf-8",
+    )
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        "workers.backend=kubernetes",
+        "workers.sandbox.proxyToken.value=test-token",
+        "eventCache.postgres.auth.password=test-password",
+        release_name="mindroom-runtime",
+        values_files=(values_path,),
+    )
+    policy = _resource(docs, "NetworkPolicy", "mindroom-runtime-workers")
+
+    assert {
+        "to": [{"podSelector": {"matchLabels": {"app": "agent-vault-bridge"}}}],
+        "ports": [{"protocol": "TCP", "port": 18080}],
+    } in policy["spec"]["egress"]
 
 
 def test_runtime_chart_disables_service_links_for_dynamic_worker_pods_by_default() -> None:
