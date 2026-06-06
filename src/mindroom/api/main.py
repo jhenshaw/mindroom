@@ -552,6 +552,7 @@ app = FastAPI(
     openapi_url=_api_docs["openapi_url"],
 )
 initialize_api_app(app, _runtime_paths)
+app.state.verify_write_user = verify_write_user
 _add_dashboard_cors_middleware(app, _runtime_paths)
 
 

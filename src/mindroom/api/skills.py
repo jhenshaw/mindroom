@@ -4,19 +4,28 @@ from __future__ import annotations
 
 import re
 import shutil
-from typing import Annotated, Any
+from collections.abc import Awaitable, Callable
+from typing import Annotated, Any, cast
 
 import yaml
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
-from mindroom.api.auth import verify_write_user
 from mindroom.constants import safe_replace
 from mindroom.tool_system.skills import get_user_skills_dir, list_skill_listings, resolve_skill_listing, skill_can_edit
 
 router = APIRouter(prefix="/api/skills", tags=["skills"])
 
 _VALID_SKILL_NAME = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
+_WriteUserVerifier = Callable[[Request, dict[str, Any]], Awaitable[dict[str, Any]]]
+
+
+async def _verify_write_user_from_app(request: Request) -> dict[str, Any]:
+    auth_user = request.scope.get("auth_user")
+    if not isinstance(auth_user, dict):
+        raise HTTPException(status_code=500, detail="Skill write auth dependency is not configured")
+    verifier = cast("_WriteUserVerifier", request.app.state.verify_write_user)
+    return await verifier(request, auth_user)
 
 
 class SkillSummary(BaseModel):
@@ -87,7 +96,7 @@ async def get_skill(skill_name: str) -> SkillDetail:
 async def update_skill(
     skill_name: str,
     payload: SkillUpdateRequest,
-    _user: Annotated[dict[str, Any], Depends(verify_write_user)],
+    _user: Annotated[dict[str, Any], Depends(_verify_write_user_from_app)],
 ) -> dict[str, bool]:
     """Update a skill's SKILL.md content."""
     listing = resolve_skill_listing(skill_name)
@@ -110,7 +119,7 @@ async def update_skill(
 @router.post("")
 async def create_skill(
     payload: CreateSkillRequest,
-    _user: Annotated[dict[str, Any], Depends(verify_write_user)],
+    _user: Annotated[dict[str, Any], Depends(_verify_write_user_from_app)],
 ) -> SkillSummary:
     """Create a new user skill."""
     name = payload.name.strip()
@@ -142,7 +151,7 @@ async def create_skill(
 @router.delete("/{skill_name}")
 async def delete_skill(
     skill_name: str,
-    _user: Annotated[dict[str, Any], Depends(verify_write_user)],
+    _user: Annotated[dict[str, Any], Depends(_verify_write_user_from_app)],
 ) -> dict[str, bool]:
     """Delete a user skill."""
     listing = resolve_skill_listing(skill_name)
