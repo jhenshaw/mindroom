@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import httpx
 
+from mindroom.redaction import redact_sensitive_data
 from mindroom.server_fetch_url import ServerFetchHTTPTransport, validate_server_fetch_url
 from mindroom.tool_system.metadata import ConfigField, SetupType, ToolCategory, ToolStatus, register_tool_with_metadata
 
@@ -135,7 +136,7 @@ def custom_api_tools() -> type[CustomApiTools]:
 
                 result: dict[str, object] = {
                     "status_code": response.status_code,
-                    "headers": dict(response.headers),
+                    "headers": cast("dict[str, str]", redact_sensitive_data(dict(response.headers))),
                     "data": response_data,
                 }
                 if not response.is_success:
