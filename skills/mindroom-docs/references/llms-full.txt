@@ -8384,13 +8384,14 @@ get_workflow_run("brief-report", "run_...")
 
 ### What It Does
 
-`report_publishing` exposes `publish_report()` and `revoke_public_report()`.
+`report_publishing` exposes `publish_report()` and `revoke_public_report(slug)`.
 All calls return JSON strings with a `status` field and operation-specific payload data.
 The tool does not accept arbitrary filesystem paths.
 It publishes only registered source references that the current Matrix requester is authorized to read.
 The current source type is `dynamic_workflow_run`.
 Published link records live under `MINDROOM_STORAGE_PATH/report_publishing/`.
 Public report links serve the registered HTML artifact without dashboard authentication until `revoke_public_report(slug)` revokes the slug.
+The `slug` is the public-report identifier returned by `publish_report()`.
 If `MINDROOM_PUBLIC_URL` is set, successful publish payloads include the absolute public URL.
 
 ### Configuration

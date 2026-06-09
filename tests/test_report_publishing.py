@@ -68,7 +68,11 @@ def _workflow_spec() -> dict[str, object]:
     }
 
 
-def _make_context(tmp_path: Path) -> ToolRuntimeContext:
+def _make_context(
+    tmp_path: Path,
+    *,
+    public_url: str = "https://acme.mindroom.chat",
+) -> ToolRuntimeContext:
     runtime_paths = test_runtime_paths(tmp_path)
     runtime_paths = runtime_paths.__class__(
         config_path=runtime_paths.config_path,
@@ -77,7 +81,7 @@ def _make_context(tmp_path: Path) -> ToolRuntimeContext:
         storage_root=runtime_paths.storage_root,
         process_env={
             **dict(runtime_paths.process_env),
-            "MINDROOM_PUBLIC_URL": "https://acme.mindroom.chat",
+            "MINDROOM_PUBLIC_URL": public_url,
         },
         env_file_values=runtime_paths.env_file_values,
     )
@@ -183,7 +187,7 @@ def test_report_publishing_tool_publishes_dynamic_workflow_run_report(tmp_path: 
     """Report Publishing should expose Dynamic Workflow reports through a source reference."""
     dynamic_workflow_tool = DynamicWorkflowTools()
     report_tool = ReportPublishingTools()
-    context = _make_context(tmp_path)
+    context = _make_context(tmp_path, public_url="https://acme.mindroom.chat/mindroom")
 
     with tool_runtime_context(context):
         _tool_payload(dynamic_workflow_tool.create_workflow(_workflow_spec(), reason="initial design"))
@@ -215,7 +219,8 @@ def test_report_publishing_tool_publishes_dynamic_workflow_run_report(tmp_path: 
         "run_id": run["run_id"],
         "scope": "agent",
     }
-    assert published["public_url"] == f"https://acme.mindroom.chat/reports/public/{published['slug']}"
+    assert published["public_url"] == f"https://acme.mindroom.chat/mindroom/reports/public/{published['slug']}"
+    assert published["public_path"] == f"/mindroom/reports/public/{published['slug']}"
     assert revoked["status"] == "ok"
     assert revoked["revoked_at"] is not None
 

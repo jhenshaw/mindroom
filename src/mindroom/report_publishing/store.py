@@ -14,6 +14,17 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
 _PUBLIC_REPORT_SLUG_RE = re.compile(r"^pub_[a-f0-9]{32}$")
+_REQUIRED_PUBLISHED_REPORT_FIELDS = frozenset(
+    {
+        "slug",
+        "source_type",
+        "artifact_path",
+        "title",
+        "requested_by",
+        "published_by",
+        "published_at",
+    },
+)
 
 
 class ReportPublishingError(ValueError):
@@ -149,6 +160,10 @@ def _published_report_to_json(report: PublishedReport) -> dict[str, object]:
 
 
 def _published_report_from_json(data: dict[str, object]) -> PublishedReport:
+    missing_fields = sorted(_REQUIRED_PUBLISHED_REPORT_FIELDS - data.keys())
+    if missing_fields:
+        msg = f"Published report record is missing field '{missing_fields[0]}'."
+        raise ReportPublishingError(msg)
     source = data.get("source", {})
     return PublishedReport(
         slug=str(data["slug"]),

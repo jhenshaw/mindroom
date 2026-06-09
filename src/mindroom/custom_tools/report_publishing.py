@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 from agno.tools import Toolkit
 from agno.tools.function import Function
@@ -139,7 +140,7 @@ class ReportPublishingTools(Toolkit):
             source=report.source,
             slug=report.slug,
             public_url=report.public_url,
-            public_path=f"/reports/public/{report.slug}",
+            public_path=_public_path_for_report(report),
             published_at=report.published_at,
         )
 
@@ -226,6 +227,15 @@ def _authorize_public_report_for_context(context: ToolRuntimeContext, report: Pu
         return
     msg = "Public report is not available to the current requester."
     raise ReportPublishingError(msg)
+
+
+def _public_path_for_report(report: PublishedReport) -> str:
+    if report.public_url is None:
+        return f"/reports/public/{report.slug}"
+    public_path = urlsplit(report.public_url).path.rstrip("/")
+    if public_path:
+        return public_path
+    return f"/reports/public/{report.slug}"
 
 
 def _reject_unsupported_source_fields(

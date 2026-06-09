@@ -66,3 +66,29 @@ def test_public_report_returns_404_after_revocation(test_client: TestClient) -> 
     assert response.status_code == 404
     assert response.json()["detail"] == "Public report was not found."
     assert storage_root not in response.text
+
+
+def test_public_report_returns_safe_404_for_invalid_slug(test_client: TestClient) -> None:
+    """Invalid public report slugs should be indistinguishable from missing reports."""
+    runtime_paths = use_trusted_upstream_runtime(test_client.app)
+
+    response = test_client.get("/reports/public/not-a-slug")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Public report was not found."
+    assert str(runtime_paths.storage_root) not in response.text
+
+
+def test_public_report_returns_safe_404_for_corrupt_record(test_client: TestClient) -> None:
+    """Corrupt public report records should not leak raw parser failures through the API."""
+    runtime_paths = use_trusted_upstream_runtime(test_client.app)
+    slug = "pub_" + ("a" * 32)
+    report_path = runtime_paths.storage_root / "report_publishing" / "public_reports" / f"{slug}.json"
+    report_path.parent.mkdir(parents=True)
+    report_path.write_text('{"slug": "' + slug + '"}', encoding="utf-8")
+
+    response = test_client.get(f"/reports/public/{slug}")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Public report was not found."
+    assert str(runtime_paths.storage_root) not in response.text
