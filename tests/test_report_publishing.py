@@ -14,7 +14,9 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
+from mindroom.custom_tools.dynamic_workflow_context import dynamic_workflow_store_and_owner
 from mindroom.custom_tools.report_publishing import ReportPublishingTools
+from mindroom.dynamic_workflows.service import DynamicWorkflowService
 from mindroom.report_publishing.store import PublishableReport, ReportPublishingError, ReportPublishingStore
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -254,6 +256,50 @@ def test_report_publishing_tool_rejects_arbitrary_sources(tmp_path: Path) -> Non
     assert "Unsupported report source_type" in unsupported["message"]
     assert extra_field["status"] == "error"
     assert "artifact_path" in extra_field["message"]
+
+
+def test_report_publishing_tool_rejects_failed_dynamic_workflow_runs(tmp_path: Path) -> None:
+    """Only completed Dynamic Workflow runs should be exposed as public report links."""
+    report_tool = ReportPublishingTools()
+    context = _make_context(tmp_path)
+    spec = _workflow_spec()
+    spec["workflow"] = [
+        {
+            "id": "write",
+            "type": "agent_step",
+            "participant": "writer",
+            "prompt": "Write about {input.topic}.",
+        },
+    ]
+    spec["outputs"] = [{"id": "brief", "type": "text", "from_step": "write"}]
+
+    with tool_runtime_context(context):
+        store, owner_id = dynamic_workflow_store_and_owner(context, "agent")
+        store.create_workflow(
+            spec=spec,
+            scope="agent",
+            owner_id=owner_id,
+            created_by=context.agent_name or "general",
+            reason="initial design",
+        )
+        run = DynamicWorkflowService(store).run_workflow(
+            workflow_id="competitor-research-report",
+            scope="agent",
+            owner_id=owner_id,
+            input_data={"topic": "Agno factories"},
+            requested_by=context.requester_id,
+        )
+        rejected = _tool_payload(
+            report_tool.publish_report(
+                source_type="dynamic_workflow_run",
+                source={"workflow_id": "competitor-research-report", "run_id": run.run_id},
+                confirm_public=True,
+            ),
+        )
+
+    assert run.status == "failed"
+    assert rejected["status"] == "error"
+    assert "Only completed" in rejected["message"]
 
 
 def test_report_publishing_tool_denies_revoke_for_different_requester(tmp_path: Path) -> None:
