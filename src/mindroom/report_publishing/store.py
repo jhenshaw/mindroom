@@ -127,7 +127,11 @@ class ReportPublishingStore:
         if relative_path.is_absolute() or ".." in relative_path.parts:
             msg = "Published report artifact path is invalid."
             raise ReportPublishingError(msg)
-        return self._storage_root / relative_path
+        report_path = self._storage_root / relative_path
+        if not report_path.resolve().is_relative_to(self._storage_root.resolve()):
+            msg = "Published report artifact path is invalid."
+            raise ReportPublishingError(msg)
+        return report_path
 
 
 def _published_report_to_json(report: PublishedReport) -> dict[str, object]:

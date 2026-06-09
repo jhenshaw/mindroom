@@ -185,6 +185,33 @@ def test_report_publishing_store_rejects_artifacts_outside_storage_root(tmp_path
         )
 
 
+def test_report_publishing_store_rejects_serve_time_symlink_escape(tmp_path: Path) -> None:
+    """Public links should not follow artifact symlinks that escape storage root."""
+    storage_root = tmp_path / "mindroom_data"
+    report_path = storage_root / "reports" / "example.html"
+    report_path.parent.mkdir(parents=True)
+    report_path.write_text("<html>Report</html>", encoding="utf-8")
+    outside_path = tmp_path / "outside.html"
+    outside_path.write_text("<html>Outside</html>", encoding="utf-8")
+    store = ReportPublishingStore(storage_root)
+    report = store.publish_report(
+        source=PublishableReport(
+            source_type="test_report",
+            source={"id": "example"},
+            artifact_path=report_path,
+            title="Example Report",
+            requested_by="@alice:localhost",
+        ),
+        published_by="@alice:localhost",
+        base_url="https://acme.mindroom.chat",
+    )
+    report_path.unlink()
+    report_path.symlink_to(outside_path)
+
+    with pytest.raises(ReportPublishingError, match="artifact path is invalid"):
+        store.public_report_html_path(report.slug)
+
+
 def test_report_publishing_tool_publishes_dynamic_workflow_run_report(tmp_path: Path) -> None:
     """Report Publishing should expose Dynamic Workflow reports through a source reference."""
     dynamic_workflow_tool = DynamicWorkflowTools()
