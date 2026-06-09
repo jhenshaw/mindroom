@@ -2780,6 +2780,124 @@ def test_create_agent_private_root_requires_execution_identity(
     assert not (tmp_path / "mind_data").exists()
 
 
+@patch("mindroom.agent_storage.SqliteDb")
+def test_create_agent_disabled_tool_names_omit_resolved_tools(
+    mock_storage: MagicMock,  # noqa: ARG001
+    tmp_path: Path,
+) -> None:
+    """Call-scoped agent construction can omit mutating tools from borrowed agents."""
+    config = _test_config()
+    config.agents["general"].tools = ["memory", "calculator"]
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(config, runtime_paths)
+    built_tools: list[str] = []
+
+    def fake_build_agent_toolkit(tool_name: str, **_kwargs: object) -> None:
+        built_tools.append(tool_name)
+
+    with patch("mindroom.agents.build_agent_toolkit", side_effect=fake_build_agent_toolkit):
+        create_agent(
+            "general",
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=None,
+            disabled_tool_names=frozenset({"memory"}),
+        )
+
+    assert "calculator" in built_tools
+    assert "memory" not in built_tools
+
+
+@patch("mindroom.agent_storage.SqliteDb")
+def test_create_agent_disable_runtime_capabilities_omits_all_tools_and_skills(
+    mock_storage: MagicMock,  # noqa: ARG001
+    tmp_path: Path,
+) -> None:
+    """Restricted in-process agent construction should reuse persona/model without capabilities."""
+    config = _test_config()
+    config.agents["general"].tools = ["memory", "calculator"]
+    workspace = agent_workspace_root_path(tmp_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "SOUL.md").write_text("Private workspace directive.", encoding="utf-8")
+    config.agents["general"].context_files = ["SOUL.md"]
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(config, runtime_paths)
+    built_tools: list[str] = []
+
+    def fake_build_agent_toolkit(tool_name: str, **_kwargs: object) -> None:
+        built_tools.append(tool_name)
+
+    with (
+        patch("mindroom.agents.build_agent_toolkit", side_effect=fake_build_agent_toolkit),
+        patch("mindroom.agents._load_agent_skills") as load_agent_skills,
+    ):
+        agent = create_agent(
+            "general",
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=None,
+            disable_runtime_capabilities=True,
+        )
+
+    assert built_tools == []
+    load_agent_skills.assert_not_called()
+    assert agent.tools is None or agent.tools == []
+    assert agent.skills is None
+    assert "Private workspace directive." not in agent.role
+    assert "## Personality Context" not in agent.role
+
+
+@patch("mindroom.agent_storage.SqliteDb")
+def test_create_agent_disable_runtime_capabilities_does_not_materialize_private_workspace(
+    mock_storage: MagicMock,  # noqa: ARG001
+    tmp_path: Path,
+) -> None:
+    """Restricted in-process agent construction should resolve private paths without creating state."""
+    template_dir = tmp_path / "template"
+    template_dir.mkdir(parents=True, exist_ok=True)
+    (template_dir / "PRIVATE.md").write_text("Private template file.", encoding="utf-8")
+
+    config = _test_config()
+    config.agents["general"].private = AgentPrivateConfig(
+        per="user",
+        root="mind_data",
+        template_dir=str(template_dir),
+    )
+    runtime_paths = _runtime_paths(tmp_path / "storage", config_path=tmp_path / "cfg" / "config.yaml")
+    config = _bind_runtime_paths(config, runtime_paths)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    runtime = resolve_agent_runtime(
+        "general",
+        config,
+        runtime_paths,
+        execution_identity=identity,
+        create=False,
+    )
+    assert runtime.workspace is not None
+    assert not runtime.workspace.root.exists()
+
+    agent = create_agent(
+        "general",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=identity,
+        session_id="session-1",
+        persist_runtime_state=False,
+        disable_runtime_capabilities=True,
+    )
+
+    assert agent.tools is None or agent.tools == []
+    assert not runtime.workspace.root.exists()
+
+
 def test_config_rejects_unknown_agent_knowledge_base_assignment() -> None:
     """Agents must not reference unknown knowledge bases."""
     with pytest.raises(ValidationError, match="Agents reference unknown knowledge bases: calculator -> research"):

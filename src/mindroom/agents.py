@@ -657,6 +657,16 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
             tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
         )
 
+    if tool_name == "dynamic_workflow":
+        from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools  # noqa: PLC0415
+
+        return _wrap_direct_agent_toolkit_for_output_files(
+            DynamicWorkflowTools(),
+            agent_runtime=agent_runtime,
+            runtime_paths=runtime_paths,
+            tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
+        )
+
     if tool_name == "dynamic_tools":
         from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit  # noqa: PLC0415
 
@@ -1106,6 +1116,9 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     active_model_name: str | None = None,
     include_interactive_questions: bool = True,
     include_openai_compat_guidance: bool = False,
+    persist_runtime_state: bool = True,
+    disable_runtime_capabilities: bool = False,
+    disabled_tool_names: frozenset[str] = frozenset(),
     delegation_depth: int = 0,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     timing_scope: str | None = None,
@@ -1130,6 +1143,11 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
             support Matrix reaction-based question flows.
         include_openai_compat_guidance: Whether to include OpenAI-compatible
             history-format guidance in the shared identity prompt.
+        persist_runtime_state: Whether this agent instance should write durable
+            Agno history, learning, and culture state.
+        disable_runtime_capabilities: Whether to omit tools, skills, knowledge,
+            and preloaded context files for a restricted in-process agent run.
+        disabled_tool_names: Resolved tool names to omit from this instance.
         delegation_depth: Current delegation nesting depth. Used to prevent
             infinite recursion when agents delegate to each other.
         refresh_scheduler: Optional runtime-owned shared knowledge refresh scheduler
@@ -1146,16 +1164,18 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     """
     del timing_scope
     resolved_storage_path = runtime_paths.storage_root
+    create_runtime_state = not disable_runtime_capabilities
     agent_runtime = resolve_agent_runtime(
         agent_name,
         config,
         runtime_paths,
         execution_identity=execution_identity,
-        create=True,
+        create=create_runtime_state,
     )
 
     agent_config = config.get_agent(agent_name)
-    ensure_default_agent_workspaces(config, resolved_storage_path)
+    if create_runtime_state:
+        ensure_default_agent_workspaces(config, resolved_storage_path)
     defaults = config.defaults
 
     plugins = _load_agent_plugins(config, runtime_paths)
@@ -1172,13 +1192,17 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     )
 
     storage = (
-        history_storage
-        if history_storage is not None
-        else agent_storage.create_state_storage(
-            agent_name,
-            agent_runtime.state_root,
-            subdir="sessions",
-            session_table=f"{agent_name}_sessions",
+        None
+        if not persist_runtime_state
+        else (
+            history_storage
+            if history_storage is not None
+            else agent_storage.create_state_storage(
+                agent_name,
+                agent_runtime.state_root,
+                subdir="sessions",
+                session_table=f"{agent_name}_sessions",
+            )
         )
     )
     # Dynamic tool state is keyed by agent and session scope, so team members
@@ -1192,6 +1216,21 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     resolved_tool_configs = {
         entry.name: entry.tool_config_overrides for entry in dynamic_tool_selection.runtime_tool_configs
     }
+    if disable_runtime_capabilities:
+        resolved_tool_configs = {}
+    elif disabled_tool_names:
+        resolved_tool_configs = {
+            tool_name: overrides
+            for tool_name, overrides in resolved_tool_configs.items()
+            if tool_name not in disabled_tool_names
+        }
+    loaded_tools = (
+        ()
+        if disable_runtime_capabilities
+        else tuple(
+            tool_name for tool_name in dynamic_tool_selection.loaded_tools if tool_name not in disabled_tool_names
+        )
+    )
     worker_tools = _resolve_runtime_worker_tools(
         agent_name,
         config,
@@ -1240,7 +1279,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
             subdir="learning",
             session_table=f"{agent_name}_learning_sessions",
         )
-        if _is_learning_enabled(agent_config, defaults)
+        if persist_runtime_state and _is_learning_enabled(agent_config, defaults)
         else None
     )
 
@@ -1274,16 +1313,17 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     # Combine identity and datetime contexts
     full_context = identity_context + datetime_context
 
-    full_context += _build_additional_context(
-        agent_name,
-        agent_config,
-        config.defaults.max_preload_chars,
-        personality_section_heading=config.get_prompt("PERSONALITY_CONTEXT_SECTION_HEADING"),
-        truncation_marker_template=config.get_prompt("CONTEXT_TRUNCATION_MARKER_TEMPLATE"),
-        workspace_context_files=workspace.context_files if workspace is not None else (),
-        storage_path=resolved_storage_path,
-        runtime_paths=runtime_paths,
-    )
+    if not disable_runtime_capabilities:
+        full_context += _build_additional_context(
+            agent_name,
+            agent_config,
+            config.defaults.max_preload_chars,
+            personality_section_heading=config.get_prompt("PERSONALITY_CONTEXT_SECTION_HEADING"),
+            truncation_marker_template=config.get_prompt("CONTEXT_TRUNCATION_MARKER_TEMPLATE"),
+            workspace_context_files=workspace.context_files if workspace is not None else (),
+            storage_path=resolved_storage_path,
+            runtime_paths=runtime_paths,
+        )
 
     role = full_context + agent_config.role
     instructions = list(agent_config.instructions)
@@ -1297,27 +1337,37 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         model_id=model.id,
     )
 
-    skills = _load_agent_skills(
-        agent_name,
-        config,
-        runtime_paths,
-        workspace_skills_root=workspace.root / "skills" if workspace is not None else None,
+    skills = (
+        None
+        if disable_runtime_capabilities
+        else _load_agent_skills(
+            agent_name,
+            config,
+            runtime_paths,
+            workspace_skills_root=workspace.root / "skills" if workspace is not None else None,
+        )
     )
     if skills and skills.get_skill_names():
         instructions.append(config.get_prompt("SKILLS_TOOL_USAGE_PROMPT"))
 
-    dynamic_tooling_block = _build_dynamic_tooling_instruction_block(
-        config,
-        agent_name,
-        enable_dynamic_tools_manager=session_id is not None,
-    )
+    dynamic_tooling_block = None
+    if not disable_runtime_capabilities:
+        dynamic_tooling_block = _build_dynamic_tooling_instruction_block(
+            config,
+            agent_name,
+            enable_dynamic_tools_manager=session_id is not None,
+        )
     if dynamic_tooling_block is not None:
         instructions.append(dynamic_tooling_block)
 
-    if agent_runtime.tool_base_dir is not None:
+    if agent_runtime.tool_base_dir is not None and not disable_runtime_capabilities:
         instructions.append(config.get_prompt("OUTPUT_REDIRECT_PROMPT"))
 
-    file_mode_knowledge_instruction = _file_mode_knowledge_instruction_block(agent_name, config, agent_runtime)
+    file_mode_knowledge_instruction = (
+        None
+        if disable_runtime_capabilities
+        else _file_mode_knowledge_instruction_block(agent_name, config, agent_runtime)
+    )
     if file_mode_knowledge_instruction is not None:
         instructions.append(file_mode_knowledge_instruction)
 
@@ -1328,24 +1378,30 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     if include_interactive_questions:
         instructions.append(config.get_prompt("INTERACTIVE_QUESTION_PROMPT"))
 
-    dynamic_tooling_state_suffix = _build_dynamic_tooling_state_suffix(
-        config,
-        agent_name,
-        loaded_tools=dynamic_tool_selection.loaded_tools,
-        enable_dynamic_tools_manager=session_id is not None,
-    )
+    dynamic_tooling_state_suffix = None
+    if not disable_runtime_capabilities:
+        dynamic_tooling_state_suffix = _build_dynamic_tooling_state_suffix(
+            config,
+            agent_name,
+            loaded_tools=loaded_tools,
+            enable_dynamic_tools_manager=session_id is not None,
+        )
     if dynamic_tooling_state_suffix is not None:
         instructions.append(dynamic_tooling_state_suffix)
 
     _log_toolkits_without_unique_model_functions(tools, agent_name=agent_name)
 
-    knowledge_enabled = bool(config.get_agent_knowledge_base_ids(agent_name)) and knowledge is not None
+    knowledge_enabled = (
+        not disable_runtime_capabilities
+        and bool(config.get_agent_knowledge_base_ids(agent_name))
+        and knowledge is not None
+    )
     knowledge_sources = (
         knowledge_source_descriptions(knowledge) if knowledge_enabled and isinstance(knowledge, Knowledge) else ()
     )
     culture_storage_root = resolved_storage_path
     cache_private_culture = False
-    if agent_runtime.is_private:
+    if agent_runtime.is_private and persist_runtime_state:
         worker_key = agent_runtime.worker_key
         if worker_key is None:
             msg = f"Private agent '{agent_name}' requires a worker key to resolve culture state"
@@ -1362,12 +1418,16 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
             worker_key=worker_key,
         )
         cache_private_culture = True
-    culture_manager, culture_settings = _resolve_agent_culture(
-        agent_name,
-        config,
-        culture_storage_root,
-        model,
-        cache_private=cache_private_culture,
+    culture_manager, culture_settings = (
+        _resolve_agent_culture(
+            agent_name,
+            config,
+            culture_storage_root,
+            model,
+            cache_private=cache_private_culture,
+        )
+        if persist_runtime_state
+        else (None, None)
     )
 
     add_culture_to_context: bool | None = None
@@ -1415,13 +1475,13 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         skills=skills,
         instructions=instructions,
         db=storage,
-        learning=_resolve_agent_learning(agent_config, defaults, learning_storage),
+        learning=_resolve_agent_learning(agent_config, defaults, learning_storage) if persist_runtime_state else False,
         markdown=agent_config.markdown if agent_config.markdown is not None else defaults.markdown,
         knowledge=knowledge if knowledge_enabled else None,
         knowledge_sources=knowledge_sources,
         search_knowledge=knowledge_enabled,
-        add_history_to_context=True,
-        add_session_summary_to_context=True,
+        add_history_to_context=persist_runtime_state,
+        add_session_summary_to_context=persist_runtime_state,
         num_history_runs=num_history_runs,
         num_history_messages=num_history_messages,
         # Keep persisted runs raw even though Agno replays history natively.
