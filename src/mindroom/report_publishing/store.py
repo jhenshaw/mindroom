@@ -64,7 +64,7 @@ class ReportPublishingStore:
 
     def __init__(self, storage_root: Path) -> None:
         self._storage_root = storage_root
-        self._root = storage_root / "report_publishing"
+        self._report_publishing_root = storage_root / "report_publishing"
 
     def publish_report(
         self,
@@ -133,7 +133,7 @@ class ReportPublishingStore:
 
     def _public_report_path(self, slug: str) -> Path:
         _validate_public_report_slug(slug)
-        return self._root / "public_reports" / f"{slug}.json"
+        return self._report_publishing_root / "public_reports" / f"{slug}.json"
 
     def _artifact_path_from_relative(self, artifact_path: str) -> Path:
         relative_path = Path(artifact_path)
