@@ -9,6 +9,7 @@ import pytest
 import yaml
 from agno.models.aws.claude import Claude as AwsBedrockClaude
 from agno.models.azure import AzureOpenAI
+from agno.models.llama_cpp import LlamaCpp
 from agno.models.message import Message
 from agno.models.response import ModelResponse
 from agno.models.vertexai.claude import Claude as VertexAIClaude
@@ -167,6 +168,36 @@ def test_get_model_instance_with_extra_kwargs() -> None:
 
     # Check that temperature was also passed
     assert model.temperature == 0.8
+
+
+def test_get_model_instance_supports_llama_cpp_provider() -> None:
+    """llama.cpp should use Agno's OpenAI-compatible local provider class."""
+    config_data = {
+        "models": {
+            "local_model": {
+                "provider": "llama_cpp",
+                "id": "gemma-4:31b-q4-uncensored",
+                "extra_kwargs": {
+                    "base_url": "http://llama.local/v1",
+                    "max_tokens": 32000,
+                },
+            },
+        },
+        "router": {
+            "model": "local_model",
+        },
+        "agents": {},
+    }
+
+    config, runtime_paths = _config_with_runtime_paths(config_data)
+
+    model = get_model_instance(config, runtime_paths, "local_model")
+
+    assert isinstance(model, LlamaCpp)
+    assert model.id == "gemma-4:31b-q4-uncensored"
+    assert model.base_url == "http://llama.local/v1"
+    assert model.max_tokens == 32000
+    assert model.default_role_map["system"] == "system"
 
 
 def test_different_providers_with_extra_kwargs() -> None:

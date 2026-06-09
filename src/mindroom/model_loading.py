@@ -11,6 +11,7 @@ from agno.models.cerebras import Cerebras
 from agno.models.deepseek import DeepSeek
 from agno.models.google import Gemini
 from agno.models.groq import Groq
+from agno.models.llama_cpp import LlamaCpp
 from agno.models.ollama import Ollama
 from agno.models.openai import OpenAIChat
 from agno.models.openrouter import OpenRouter
@@ -232,6 +233,7 @@ def _create_model_for_provider(  # noqa: C901, PLR0912, PLR0915
         "gemini": Gemini,
         "google": Gemini,
         "vertexai_claude": MindroomVertexAIClaude,
+        "llama_cpp": LlamaCpp,
         "cerebras": Cerebras,
         "groq": Groq,
         "deepseek": DeepSeek,
