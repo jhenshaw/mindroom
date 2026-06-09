@@ -7399,8 +7399,6 @@
         "update_workflow",
         "run_workflow",
         "get_workflow_run",
-        "publish_workflow_report",
-        "revoke_public_report",
         "list_workflows",
         "list_workflow_revisions"
       ],
@@ -8029,6 +8027,28 @@
       "icon": "Database",
       "icon_color": "text-blue-600",
       "name": "pandas",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "productivity",
+      "config_fields": [],
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [],
+      "description": "Publish authorized report artifacts through revocable public links",
+      "display_name": "Report Publishing",
+      "docs_url": null,
+      "function_names": [
+        "publish_report",
+        "revoke_public_report"
+      ],
+      "helper_text": null,
+      "icon": "Share2",
+      "icon_color": "text-emerald-500",
+      "name": "report_publishing",
       "setup_type": "none",
       "status": "available"
     },
