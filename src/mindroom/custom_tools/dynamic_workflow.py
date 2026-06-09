@@ -15,6 +15,8 @@ from agno.tools import Toolkit
 
 from mindroom import model_loading
 from mindroom.authorization import responder_candidate_entities_from_cached_room
+from mindroom.config.approval import ApprovalRuleConfig
+from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.custom_tools.dynamic_workflow_context import (
     authorize_dynamic_workflow_run,
     dynamic_workflow_store,
@@ -26,18 +28,32 @@ from mindroom.dynamic_workflows.runner import DynamicWorkflowExecutionError
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
 from mindroom.dynamic_workflows.store import DynamicWorkflowError
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     build_execution_identity_from_runtime_context,
     get_tool_runtime_context,
     tool_runtime_context,
 )
+from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 
 if TYPE_CHECKING:
+    from mindroom.config.main import Config
     from mindroom.dynamic_workflows.runner import AsyncParticipantExecutor, ParticipantExecutor
 
+# Agent-infrastructure toolkits that are built outside the tool registry and presume
+# a durable agent runtime; they can never be granted to workflow participants.
+_WORKFLOW_RESTRICTED_TOOLS = frozenset(
+    {"compact_context", "delegate", "dynamic_tools", "dynamic_workflow", "memory", "self_config"},
+)
+
 _TOOL_DESCRIPTIONS = {
-    "create_workflow": "Create a Dynamic Workflow from a declarative workflow spec.",
+    "create_workflow": (
+        "Create a Dynamic Workflow from a declarative workflow spec. "
+        "Ephemeral participants may declare any registered tool when it is also granted in "
+        "permissions.tools; participant tool calls require per-call user approval unless the "
+        "tool is pre-approved by the dynamic_workflow allowed_tools config."
+    ),
     "validate_workflow": "Validate a declarative Dynamic Workflow spec without saving it.",
     "update_workflow": "Create and publish a new Dynamic Workflow revision from a patch.",
     "run_workflow": "Run a Dynamic Workflow and persist step outputs plus report artifacts.",
@@ -600,10 +616,7 @@ async def _aexecute_ephemeral_agent_participant(
     *,
     run_scope: str,
 ) -> object:
-    tools = participant.get("tools", [])
-    if tools not in (None, []):
-        msg = "Dynamic Workflow participants cannot use tools until workflow tool grants are supported."
-        raise DynamicWorkflowError(msg)
+    toolkits_by_name = _resolve_participant_toolkits(context, participant)
     participant_id = _required_participant_text(participant, "id")
     model_name = _resolve_participant_model_name(
         context,
@@ -612,22 +625,149 @@ async def _aexecute_ephemeral_agent_participant(
     )
     execution_identity = build_execution_identity_from_runtime_context(context)
     model = model_loading.get_model_instance(context.config, context.runtime_paths, model_name, execution_identity)
+    run_config = _participant_run_config(context, toolkits_by_name)
+    bridge = build_tool_hook_bridge(
+        context.hook_registry,
+        agent_name=context.agent_name,
+        config=run_config,
+        runtime_paths=context.runtime_paths,
+    )
     agent = Agent(
         id=f"dynamic_workflow_{participant_id}",
         name=str(participant.get("name") or participant_id),
         role=str(participant.get("role") or participant.get("description") or "Dynamic Workflow participant."),
         model=model,
-        tools=[],
+        tools=[prepend_tool_hook_bridge(toolkit, bridge) for toolkit in toolkits_by_name.values()],
         instructions=_participant_instructions(participant),
         markdown=True,
         telemetry=False,
     )
     participant_context = replace(
         context,
+        config=run_config,
         active_model_name=model_name,
         session_id=_participant_session_id(context, participant_id, run_scope=run_scope),
     )
     return await _arun_agent(participant_context, agent, prompt)
+
+
+def _resolve_participant_toolkits(context: ToolRuntimeContext, participant: dict[str, object]) -> dict[str, Toolkit]:
+    """Resolve participant tool grants to toolkit instances with the caller's tool routing."""
+    tool_names = _participant_tool_names(participant)
+    if not tool_names:
+        return {}
+    ensure_tool_registry_loaded(context.runtime_paths, context.config)
+    _reject_unavailable_workflow_tools(tool_names)
+    # Imported lazily to avoid the create_agent -> dynamic_workflow toolkit cycle.
+    from mindroom.agents import build_agent_toolkit, resolve_runtime_worker_tools  # noqa: PLC0415
+
+    execution_identity = build_execution_identity_from_runtime_context(context)
+    worker_tools = resolve_runtime_worker_tools(
+        context.agent_name,
+        context.config,
+        context.runtime_paths,
+        list(tool_names),
+        tool_registry_preloaded=True,
+    )
+    authored_overrides = {
+        entry.name: entry.tool_config_overrides for entry in context.config.get_agent_tool_configs(context.agent_name)
+    }
+    toolkits: dict[str, Toolkit] = {}
+    for tool_name in tool_names:
+        toolkit = build_agent_toolkit(
+            tool_name,
+            agent_name=context.agent_name,
+            config=context.config,
+            runtime_paths=context.runtime_paths,
+            worker_tools=worker_tools,
+            runtime_overrides=context.config.get_agent_tool_runtime_overrides(context.agent_name, tool_name),
+            tool_config_overrides=authored_overrides.get(tool_name),
+            execution_identity=execution_identity,
+            session_id=context.session_id,
+        )
+        if toolkit is None:
+            msg = f"Dynamic Workflow participant tool '{tool_name}' is not available in this runtime."
+            raise DynamicWorkflowError(msg)
+        toolkits[tool_name] = toolkit
+    return toolkits
+
+
+def _participant_tool_names(participant: dict[str, object]) -> list[str]:
+    raw_tools = participant.get("tools")
+    if raw_tools is None:
+        return []
+    if not isinstance(raw_tools, list) or not all(isinstance(tool, str) and tool.strip() for tool in raw_tools):
+        msg = "Dynamic Workflow participant tools must be a list of non-empty strings."
+        raise DynamicWorkflowError(msg)
+    tool_names: list[str] = []
+    for raw_tool in raw_tools:
+        tool_name = cast("str", raw_tool).strip()
+        if tool_name not in tool_names:
+            tool_names.append(tool_name)
+    return tool_names
+
+
+def _reject_unavailable_workflow_tools(tool_names: list[str]) -> None:
+    for tool_name in tool_names:
+        if tool_name in _WORKFLOW_RESTRICTED_TOOLS:
+            msg = f"Dynamic Workflow participants cannot use agent-infrastructure tool '{tool_name}'."
+            raise DynamicWorkflowError(msg)
+        if tool_name not in TOOL_METADATA:
+            msg = f"Dynamic Workflow participant tool '{tool_name}' is not a registered tool."
+            raise DynamicWorkflowError(msg)
+
+
+def _participant_run_config(context: ToolRuntimeContext, toolkits_by_name: dict[str, Toolkit]) -> Config:
+    """Return a config that requires per-call approval for granted tools that are not pre-approved."""
+    if not toolkits_by_name:
+        return context.config
+    allowed_tools = _workflow_allowed_tools(context)
+    allow_all = "*" in allowed_tools
+    # The approval engine matches by bare function name, but function names collide across
+    # toolkits (read_file on python and file, run_shell_command on daytona and shell). A function
+    # is only safe to pre-approve when every granted toolkit exposing it is itself pre-approved;
+    # otherwise a non-pre-approved toolkit's call would inherit the auto-approve rule.
+    owning_tools: dict[str, set[str]] = {}
+    for tool_name, toolkit in toolkits_by_name.items():
+        for function_name in (*toolkit.functions, *toolkit.async_functions):
+            owning_tools.setdefault(function_name, set()).add(tool_name)
+    pre_approved_tools = {tool_name for tool_name in toolkits_by_name if allow_all or tool_name in allowed_tools}
+    pre_approved_functions = sorted(
+        function_name for function_name, tools in owning_tools.items() if tools <= pre_approved_tools
+    )
+    tool_approval = context.config.tool_approval.model_copy(
+        update={
+            "default": "require_approval",
+            # Operator-authored rules keep precedence (first match wins); workflow pre-approval
+            # only applies to functions the operator has not already ruled on.
+            "rules": [
+                *context.config.tool_approval.rules,
+                *(
+                    ApprovalRuleConfig(match=function_name, action="auto_approve")
+                    for function_name in pre_approved_functions
+                ),
+            ],
+        },
+    )
+    return context.config.model_copy(update={"tool_approval": tool_approval})
+
+
+def _workflow_allowed_tools(context: ToolRuntimeContext) -> frozenset[str]:
+    """Resolve pre-approved workflow tool names from dashboard and authored tool config."""
+    values: dict[str, object] = {}
+    credentials_manager = get_runtime_credentials_manager(context.runtime_paths)
+    persisted = load_scoped_credentials("dynamic_workflow", credentials_manager=credentials_manager, worker_target=None)
+    if persisted:
+        values.update(persisted)
+    for entry in context.config.get_agent_tool_configs(context.agent_name):
+        if entry.name == "dynamic_workflow":
+            values.update(entry.tool_config_overrides)
+    raw_allowed = values.get("allowed_tools")
+    if isinstance(raw_allowed, str):
+        raw_allowed = [raw_allowed]
+    if not isinstance(raw_allowed, list):
+        return frozenset()
+    return frozenset(tool.strip() for tool in raw_allowed if isinstance(tool, str) and tool.strip())
 
 
 async def _arun_agent(context: ToolRuntimeContext, agent: Agent, prompt: str) -> object:
@@ -703,6 +843,33 @@ def _validate_workflow_policy_for_context(context: ToolRuntimeContext, spec: dic
                 "Use the caller's active model or add an approval policy before requesting another model."
             )
             raise DynamicWorkflowError(msg)
+    _validate_workflow_tool_policy_for_context(context, spec)
+
+
+def _validate_workflow_tool_policy_for_context(context: ToolRuntimeContext, spec: dict[str, object]) -> None:
+    """Reject tool grants that name unregistered or agent-infrastructure tools."""
+    tool_names = _spec_tool_names(spec)
+    if not tool_names:
+        return
+    ensure_tool_registry_loaded(context.runtime_paths, context.config)
+    _reject_unavailable_workflow_tools(tool_names)
+
+
+def _spec_tool_names(spec: dict[str, object]) -> list[str]:
+    """Collect declared tool grant names from a possibly un-normalized spec."""
+    tool_lists: list[object] = []
+    raw_permissions = spec.get("permissions")
+    if isinstance(raw_permissions, dict):
+        tool_lists.append(cast("dict[str, object]", raw_permissions).get("tools"))
+    tool_lists.extend(participant.get("tools") for participant in _workflow_participants(spec))
+    tool_names: list[str] = []
+    for raw_tools in tool_lists:
+        if not isinstance(raw_tools, list):
+            continue
+        for raw_tool in raw_tools:
+            if isinstance(raw_tool, str) and raw_tool.strip() and raw_tool.strip() not in tool_names:
+                tool_names.append(raw_tool.strip())
+    return tool_names
 
 
 def _caller_allowed_model_refs(context: ToolRuntimeContext) -> set[str]:
