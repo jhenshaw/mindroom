@@ -103,6 +103,7 @@ class AgentVaultAccessTools(Toolkit):
             # token, or a rotation between them could 401 the second call.
             token = self._resolve_admin_token()
             await self._ensure_vault(vault, token)
+            await self._ensure_vault_admin(vault, token)
             granted = await self._grant_member(vault, email, token)
         except _AgentVaultAccessError as exc:
             return self._error(str(exc))
@@ -166,6 +167,28 @@ class AgentVaultAccessTools(Toolkit):
         # 409/422 mean the vault already exists, which is fine for an idempotent grant.
         if response.status_code in {200, 201, 409, 422}:
             return
+        response.raise_for_status()
+
+    async def _ensure_vault_admin(self, vault: str, token: str) -> None:
+        # Granting membership requires vault-admin on that specific vault, and
+        # instance owners are not vault admins implicitly. Vaults created by
+        # the worker token-mint flow do not include this admin actor, so join
+        # (owner-only, grants vault-admin) before granting.
+        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT_SECONDS) as client:
+            response = await client.post(
+                urljoin(self._api_url.rstrip("/") + "/", f"v1/vaults/{quote(vault, safe='')}/join"),
+                headers=self._headers(token),
+            )
+        # 409 means this actor is already a vault member, fine for an idempotent grant.
+        if response.status_code in {200, 201, 409}:
+            return
+        if response.status_code == 403:
+            msg = (
+                "the configured Agent Vault admin token cannot join this vault: "
+                "/join is owner-only, so the token must belong to an instance-owner "
+                "agent or session, not a plain admin/member one."
+            )
+            raise _AgentVaultAccessError(msg)
         response.raise_for_status()
 
     async def _grant_member(self, vault: str, email: str, token: str) -> bool:
