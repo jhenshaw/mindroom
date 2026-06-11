@@ -51,6 +51,11 @@ from mindroom.config.models import (
     ToolConfigEntry,
 )
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
+from mindroom.config.runtime_overlays import (
+    apply_runtime_approved_egress_overlay,
+    strip_runtime_approved_egress_overlay_from_dump,
+)
+from mindroom.config.tool_entries import raw_tool_entry_name_and_lazy_flag_fields, raw_tools_entries
 from mindroom.config.voice import VoiceConfig
 from mindroom.constants import (
     DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
@@ -336,50 +341,13 @@ def _tool_entry_has_lazy_flag_field(entry: ToolConfigEntry) -> bool:
     return bool(entry.model_fields_set & {"defer", "initial"})
 
 
-def _raw_tool_entry_name_and_lazy_flag_fields(entry: object) -> tuple[str | None, bool, bool]:
-    """Return the authored tool name and lazy flag field presence from one raw config entry."""
-    name: str | None = None
-    defer = False
-    initial = False
-
-    if isinstance(entry, ToolConfigEntry):
-        name = entry.name
-        defer = "defer" in entry.model_fields_set
-        initial = "initial" in entry.model_fields_set
-    elif isinstance(entry, str):
-        name = entry
-    elif isinstance(entry, dict):
-        raw_entry = cast("dict[object, object]", entry)
-        if "name" in raw_entry or "overrides" in raw_entry:
-            raw_name = raw_entry.get("name")
-            name = raw_name if isinstance(raw_name, str) else None
-            defer = "defer" in raw_entry
-            initial = "initial" in raw_entry
-        elif len(raw_entry) == 1:
-            raw_name, overrides = next(iter(raw_entry.items()))
-            name = raw_name if isinstance(raw_name, str) else None
-            if isinstance(overrides, dict):
-                override_map = cast("dict[object, object]", overrides)
-                defer = "defer" in override_map
-                initial = "initial" in override_map
-
-    return name, defer, initial
-
-
-def _raw_tools_entries(data: dict[object, object], section: str) -> list[object]:
-    raw_section = data.get(section)
-    if not isinstance(raw_section, dict):
-        return []
-    section_data = cast("dict[object, object]", raw_section)
-    tools = section_data.get("tools")
-    return list(tools) if isinstance(tools, list) else []
-
-
 class Config(BaseModel):
     """Complete configuration from YAML."""
 
     model_config = ConfigDict(extra="forbid")
     _unavailable_plugin_tool_names: set[str] = PrivateAttr(default_factory=set)
+    _runtime_approved_egress_injected_default_tool: bool = PrivateAttr(default=False)
+    _runtime_approved_egress_injected_approval_rule: bool = PrivateAttr(default=False)
 
     PRIVATE_KNOWLEDGE_BASE_ID_PREFIX: ClassVar[str] = "__agent_private__:"
     TOOL_PRESETS: ClassVar[dict[str, tuple[str, ...]]] = {
@@ -467,7 +435,7 @@ class Config(BaseModel):
 
     @classmethod
     def _validate_raw_tool_lazy_flag_boundary(cls, entry: object, *, config_path: str) -> None:
-        name, defer, initial = _raw_tool_entry_name_and_lazy_flag_fields(entry)
+        name, defer, initial = raw_tool_entry_name_and_lazy_flag_fields(entry)
         if name is None or not (defer or initial):
             return
         if msg := cls._lazy_flag_prohibited_message(tool_name=name, config_path=config_path):
@@ -482,7 +450,7 @@ class Config(BaseModel):
             return normalized
 
         raw_data = cast("dict[object, object]", normalized)
-        for entry in _raw_tools_entries(raw_data, "defaults"):
+        for entry in raw_tools_entries(raw_data, "defaults"):
             cls._validate_raw_tool_lazy_flag_boundary(entry, config_path="defaults.tools")
 
         raw_agents = raw_data.get("agents")
@@ -1026,7 +994,11 @@ class Config(BaseModel):
         tolerate_plugin_load_errors: bool = False,
     ) -> Config:
         """Validate config data against one explicit runtime context."""
-        config = cls.model_validate(normalized_config_data(data), context={"runtime_paths": runtime_paths})
+        normalized_data = normalized_config_data(data)
+        approved_egress_overlay = apply_runtime_approved_egress_overlay(normalized_data, runtime_paths)
+        config = cls.model_validate(approved_egress_overlay.data, context={"runtime_paths": runtime_paths})
+        config._runtime_approved_egress_injected_default_tool = approved_egress_overlay.injected_default_tool
+        config._runtime_approved_egress_injected_approval_rule = approved_egress_overlay.injected_approval_rule
         # why-lazy: module-top catalog import pulls runtime tool registry paths and loads agents+tools at config import.
         from mindroom.tool_system.catalog import ToolConfigOverrideError, ToolMetadataValidationError  # noqa: PLC0415
 
@@ -1044,7 +1016,13 @@ class Config(BaseModel):
 
     def authored_model_dump(self) -> dict[str, Any]:
         """Serialize authored config."""
-        return _strip_empty_root_sections(cast("dict[str, Any]", self.model_dump(exclude_unset=True)))
+        payload = cast("dict[str, Any]", self.model_dump(exclude_unset=True))
+        payload = strip_runtime_approved_egress_overlay_from_dump(
+            payload,
+            injected_default_tool=self._runtime_approved_egress_injected_default_tool,
+            injected_approval_rule=self._runtime_approved_egress_injected_approval_rule,
+        )
+        return _strip_empty_root_sections(payload)
 
     def get_agent_culture(self, agent_name: str) -> tuple[str, CultureConfig] | None:
         """Get the configured culture assignment for an agent, if any."""
