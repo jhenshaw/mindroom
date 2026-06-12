@@ -127,6 +127,7 @@ if TYPE_CHECKING:
     from mindroom.message_target import MessageTarget
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.response_runner import ResponseRunner
+    from mindroom.sync_restart_retry import SyncRestartRetryQueue
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.turn_store import TurnStore
 
@@ -292,6 +293,7 @@ class TurnControllerDeps:
     coalescing_gate: CoalescingGate
     edit_regenerator: _EditRegenerator
     ingress: IngressValidator
+    restart_retry: SyncRestartRetryQueue
 
 
 @dataclass
@@ -1527,6 +1529,37 @@ class TurnController:
             ),
         )
 
+    def _build_sync_restart_retry_registrar(
+        self,
+        room: nio.MatrixRoom,
+        event: DispatchEvent,
+        dispatch: PreparedDispatch,
+        action: ResponseAction,
+        payload_inputs: DispatchPayloadInputs,
+        *,
+        handled_turn: HandledTurnState,
+        matrix_run_metadata: dict[str, Any] | None,
+    ) -> Callable[[], None]:
+        """Build the callback that queues a one-shot re-dispatch after stall recovery."""
+
+        def register_sync_restart_retry() -> None:
+            async def retry() -> None:
+                await self._execute_response_action(
+                    room,
+                    event,
+                    dispatch,
+                    action,
+                    payload_inputs,
+                    processing_log="Retrying response interrupted by sync restart",
+                    dispatch_started_at=time.monotonic(),
+                    handled_turn=handled_turn,
+                    matrix_run_metadata=matrix_run_metadata,
+                )
+
+            self.deps.restart_retry.register(event.event_id, retry)
+
+        return register_sync_restart_retry
+
     async def _execute_response_action(  # noqa: C901, PLR0912
         self,
         room: nio.MatrixRoom,
@@ -1603,6 +1636,16 @@ class TurnController:
                 dispatch_started_at=dispatch_started_at,
                 context_ready_monotonic=context_ready_monotonic,
             )
+
+            register_sync_restart_retry = self._build_sync_restart_retry_registrar(
+                room,
+                event,
+                dispatch,
+                action,
+                payload_inputs,
+                handled_turn=handled_turn,
+                matrix_run_metadata=matrix_run_metadata,
+            )
             try:
                 if action.kind == "team":
                     assert action.form_team is not None
@@ -1628,6 +1671,7 @@ class TurnController:
                             pipeline_timing=dispatch_timing,
                             queued_notice_reservation=queued_notice_reservation,
                             on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
+                            on_sync_restart_cancelled=register_sync_restart_retry,
                         ),
                         team_agents=action.form_team.eligible_members,
                         team_mode=team_mode.value,
@@ -1646,6 +1690,7 @@ class TurnController:
                             pipeline_timing=dispatch_timing,
                             queued_notice_reservation=queued_notice_reservation,
                             on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
+                            on_sync_restart_cancelled=register_sync_restart_retry,
                         ),
                     )
             except PostLockRequestPreparationError as error:

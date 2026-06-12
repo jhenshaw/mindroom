@@ -33,6 +33,7 @@ from mindroom.orchestration.runtime import (
     sync_forever_with_restart,
 )
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.sync_restart_retry import SyncRestartRetryQueue
 from tests.conftest import (
     TEST_PASSWORD,
     make_event_cache_mock,
@@ -188,6 +189,83 @@ async def test_sync_forever_with_restart_restarts_stalled_sync(monkeypatch: pyte
     assert bot.first_call_cancel_args == (SYNC_RESTART_CANCEL_MSG,)
     assert bot.sync_calls == 1  # sync_forever called once, then sync_then_stop stopped
     assert bot.prepare_for_sync_shutdown_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_stalled_restart_waits_with_jitter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A watchdog-driven restart must add jitter so stalled loops don't restart as one herd."""
+    bot = _FakeBot()
+    original_mark = bot.mark_sync_loop_started
+
+    def arm_and_mark() -> None:
+        original_mark()
+        bot._last_sync_monotonic = time.monotonic()
+
+    bot.mark_sync_loop_started = arm_and_mark
+    original_sync = bot.sync_forever
+
+    async def sync_then_stop() -> None:
+        if bot.sync_calls > 0:
+            bot.running = False
+            return
+        await original_sync()
+
+    bot.sync_forever = sync_then_stop
+
+    jitter_calls: list[float] = []
+
+    def fake_jitter() -> float:
+        jitter_calls.append(0.0)
+        return 0.0
+
+    monkeypatch.setattr(runtime_helpers, "MATRIX_SYNC_WATCHDOG_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(runtime_helpers, "MATRIX_SYNC_STARTUP_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr(runtime_helpers, "_MATRIX_SYNC_WATCHDOG_POLL_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(runtime_helpers, "retry_delay_seconds", lambda *_args, **_kwargs: 0.0)
+    monkeypatch.setattr(runtime_helpers, "_stalled_restart_jitter_seconds", fake_jitter)
+
+    await sync_forever_with_restart(bot, max_retries=2)
+
+    assert len(jitter_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_restart_does_not_add_jitter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ordinary sync failures keep the plain backoff without stall jitter."""
+    bot = _FakeBot()
+
+    async def fail_once() -> None:
+        bot.sync_calls += 1
+        if bot.sync_calls > 1:
+            bot.running = False
+            return
+        msg = "deliberate test error"
+        raise RuntimeError(msg)
+
+    bot.sync_forever = fail_once
+
+    jitter_calls: list[float] = []
+
+    def fake_jitter() -> float:
+        jitter_calls.append(0.0)
+        return 0.0
+
+    monkeypatch.setattr(runtime_helpers, "MATRIX_SYNC_WATCHDOG_TIMEOUT_SECONDS", 5.0)
+    monkeypatch.setattr(runtime_helpers, "MATRIX_SYNC_STARTUP_GRACE_SECONDS", 5.0)
+    monkeypatch.setattr(runtime_helpers, "_MATRIX_SYNC_WATCHDOG_POLL_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(runtime_helpers, "retry_delay_seconds", lambda *_args, **_kwargs: 0.0)
+    monkeypatch.setattr(runtime_helpers, "_stalled_restart_jitter_seconds", fake_jitter)
+
+    await sync_forever_with_restart(bot, max_retries=2)
+
+    assert jitter_calls == []
+
+
+def test_stalled_restart_jitter_spreads_restarts() -> None:
+    """Many stalled loops must restart over a spread window, not in one tick."""
+    delays = [runtime_helpers._stalled_restart_jitter_seconds() for _ in range(27)]
+    assert all(0.0 <= delay <= 10.0 for delay in delays)
+    assert max(delays) - min(delays) > 1.0
 
 
 @pytest.mark.asyncio
@@ -619,6 +697,7 @@ async def test_full_state_only_after_successful_first_sync() -> None:
     bot._first_sync_done = False
     bot._sync_shutting_down = False
     bot._room_member_join_hooks_armed = False
+    bot._restart_retry_queue = SyncRestartRetryQueue()
     bot.client = FakeClient()
     bot.orchestrator = None
     bot._runtime_view = BotRuntimeState(
