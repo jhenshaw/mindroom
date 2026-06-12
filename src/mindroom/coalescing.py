@@ -207,6 +207,13 @@ class CoalescingGate:
     State machine per (room, thread, sender) key:
     IDLE (absent) -> DEBOUNCE -> GRACE (optional, wait for images) ->
     flush -> IN_FLIGHT, while all undispatched work remains in one FIFO queue.
+
+    The gate owns ingress ORDERING, not response EXECUTION: a dispatched batch
+    holds its gate only until the executor marks ``batch.response_start``
+    (target resolved, per-thread response lock held) or the dispatch callback
+    returns, whichever happens first. Started responses keep running on
+    gate-tracked background tasks so later batches for other targets dispatch
+    concurrently while drains can still settle or cancel them.
     """
 
     def __init__(
@@ -226,6 +233,7 @@ class CoalescingGate:
         self._gates: dict[CoalescingKey, _GateEntry] = {}
         self._order_book = CoalescingOrderBook()
         self._active_drain_context: _DrainContext | None = None
+        self._started_dispatch_tasks: set[asyncio.Task[None]] = set()
 
     def _remove_gate(self, key: CoalescingKey) -> None:
         self._gates.pop(key, None)
@@ -1172,6 +1180,37 @@ class CoalescingGate:
             error_message="Coalesced dispatch failed.",
         )
 
+    async def _dispatch_batch_until_response_started(self, batch: CoalescedBatch) -> asyncio.Task[None] | None:
+        """Run one dispatch until it completes or its response starts, whichever is first.
+
+        Returns the still-running dispatch task when the executor signalled
+        response start before completing, so the caller can release ordering
+        while execution continues.
+        """
+
+        async def _run_dispatch() -> None:
+            await self._dispatch_batch(batch)
+
+        dispatch_task = asyncio.create_task(
+            _run_dispatch(),
+            name=f"coalescing_dispatch:{batch.primary_event.event_id}",
+        )
+        response_started = asyncio.create_task(batch.response_start.wait_started())
+        try:
+            await asyncio.wait({dispatch_task, response_started}, return_when=asyncio.FIRST_COMPLETED)
+        except asyncio.CancelledError:
+            dispatch_task.cancel()
+            await asyncio.gather(dispatch_task, return_exceptions=True)
+            raise
+        finally:
+            # The waiter only observes an asyncio.Event, so a plain cancel is
+            # safe without awaiting its termination.
+            response_started.cancel()
+        if dispatch_task.done():
+            await dispatch_task
+            return None
+        return dispatch_task
+
     async def _dispatch_events(
         self,
         key: CoalescingKey,
@@ -1179,8 +1218,8 @@ class CoalescingGate:
         pending_events: list[PendingEvent],
         *,
         bypass_grace: bool,
-    ) -> str:
-        """Dispatch a claimed batch."""
+    ) -> asyncio.Task[None] | None:
+        """Dispatch a claimed batch, returning its task while the started response keeps running."""
         flush_start = time.monotonic()
         gate.phase = GatePhase.IN_FLIGHT
         gate.deadline = None
@@ -1197,7 +1236,7 @@ class CoalescingGate:
             "source_event_ids": self._source_event_ids(pending_events),
             "timing_scope": timing_scope,
         }
-        dispatched = False
+        outcome = "failed"
         try:
             diagnostics = self._flush_diagnostics(key, pending_events, bypass_grace=bypass_grace)
             pending_count = diagnostics.pending_count
@@ -1205,8 +1244,8 @@ class CoalescingGate:
             log_context = diagnostics.log_context
             logger.info("coalescing_gate_flush_started", **log_context)
             dispatch_batch_start = time.monotonic()
-            await self._dispatch_batch(diagnostics.batch)
-            dispatched = True
+            started_dispatch = await self._dispatch_batch_until_response_started(diagnostics.batch)
+            outcome = "dispatched" if started_dispatch is None else "response_started"
             emit_elapsed_timing(
                 "coalescing_gate.flush.dispatch_batch",
                 dispatch_batch_start,
@@ -1214,9 +1253,8 @@ class CoalescingGate:
                 bypass_grace=bypass_grace,
                 timing_scope=timing_scope,
             )
-            return "dispatched"
+            return started_dispatch
         finally:
-            outcome = "dispatched" if dispatched else "failed"
             emit_elapsed_timing(
                 "coalescing_gate.flush",
                 flush_start,
@@ -1235,6 +1273,43 @@ class CoalescingGate:
             gate.deadline = None
             self._wake_related_gates(key)
 
+    async def _settle_started_dispatch(
+        self,
+        key: CoalescingKey,
+        gate: _GateEntry,
+        segment_owner: ClaimedSegmentOwner,
+        dispatch_task: asyncio.Task[None],
+    ) -> None:
+        """Await one started dispatch after the gate released its ordering hold."""
+        try:
+            await dispatch_task
+        except asyncio.CancelledError:
+            if not dispatch_task.done():
+                dispatch_task.cancel()
+                await asyncio.gather(dispatch_task, return_exceptions=True)
+            segment_owner.close_metadata_once()
+            raise
+        except Exception as error:
+            segment_owner.close_metadata_once()
+            if (drain_context := self._current_drain_context(gate)) is not None:
+                drain_context.result.dispatch_failure_count += 1
+            self._log_dispatch_failure(key, gate, error)
+
+    def _adopt_started_dispatch(
+        self,
+        key: CoalescingKey,
+        gate: _GateEntry,
+        segment_owner: ClaimedSegmentOwner,
+        dispatch_task: asyncio.Task[None],
+    ) -> None:
+        """Track one started dispatch so drains can settle it after the gate releases."""
+        settle_task = asyncio.create_task(
+            self._settle_started_dispatch(key, gate, segment_owner, dispatch_task),
+            name=f"coalescing_started_dispatch:{key.room_id}:{key.thread_id or 'room'}:{key.requester_user_id}",
+        )
+        self._started_dispatch_tasks.add(settle_task)
+        settle_task.add_done_callback(self._started_dispatch_tasks.discard)
+
     async def _dispatch_claimed_events(
         self,
         key: CoalescingKey,
@@ -1244,7 +1319,12 @@ class CoalescingGate:
         bypass_grace: bool,
     ) -> None:
         try:
-            await self._dispatch_events(key, gate, segment_owner.pending_events, bypass_grace=bypass_grace)
+            started_dispatch = await self._dispatch_events(
+                key,
+                gate,
+                segment_owner.pending_events,
+                bypass_grace=bypass_grace,
+            )
         except asyncio.CancelledError:
             segment_owner.close_metadata_once()
             if (drain_context := self._current_drain_context(gate)) is not None:
@@ -1255,6 +1335,9 @@ class CoalescingGate:
             if (drain_context := self._current_drain_context(gate)) is not None:
                 drain_context.result.dispatch_failure_count += 1
             self._log_dispatch_failure(key, gate, error)
+        else:
+            if started_dispatch is not None:
+                self._adopt_started_dispatch(key, gate, segment_owner, started_dispatch)
 
     async def _dispatch_after_upload_grace(
         self,
@@ -1610,9 +1693,34 @@ class _CoalescingDrainCoordinator:
         result = await asyncio.gather(*done, return_exceptions=True)
         return close_ready_task_result_metadata(result[0])
 
+    async def _cancel_started_dispatch_tasks_for_bounded_shutdown(self) -> None:
+        """Cancel started responses a bounded drain can no longer wait for."""
+        pending_tasks = [task for task in self.gate._started_dispatch_tasks if not task.done()]
+        for task in pending_tasks:
+            task.cancel()
+            self.context.result.dispatch_cancelled_count += 1
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
+
+    async def _await_started_dispatch_tasks(self) -> None:
+        """Settle started dispatches that keep running after their gates released."""
+        pending_tasks = [task for task in self.gate._started_dispatch_tasks if not task.done()]
+        if not pending_tasks:
+            return
+        if not self.gate._is_bounded_drain(self.context):
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
+            return
+        _, still_pending = await asyncio.wait(pending_tasks, timeout=self.context.ready_timeout_seconds)
+        for task in still_pending:
+            task.cancel()
+            self.context.result.dispatch_cancelled_count += 1
+        if still_pending:
+            await asyncio.gather(*still_pending, return_exceptions=True)
+
     async def _abandon_gate_work_for_bounded_shutdown(self) -> None:
         if not self.gate._is_bounded_drain(self.context):
             return
+        await self._cancel_started_dispatch_tasks_for_bounded_shutdown()
         dropped_ready_count = 0
         for gate in self.gate._gates.values():
             if gate.drain_task is not None and not gate.drain_task.done():
@@ -1668,6 +1776,7 @@ class _CoalescingDrainCoordinator:
             return True
         if active_pending:
             return False
+        await self._await_started_dispatch_tasks()
         return self.gate._order_book.all_settled()
 
     def _clear_context(self) -> None:

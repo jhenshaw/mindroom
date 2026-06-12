@@ -33,7 +33,7 @@ from mindroom.timing import (
 from mindroom.timing import timing_scope as timing_scope_context
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     import nio
 
@@ -83,6 +83,7 @@ async def dispatch_text_message(
     ingress_metadata: DispatchIngressMetadata | None = None,
     payload_metadata: DispatchPayloadMetadata | None = None,
     trust_hydrated_internal_metadata: bool | None = None,
+    on_lifecycle_lock_acquired: Callable[[], None] | None = None,
 ) -> None:
     """Run the normal text or command dispatch pipeline for a prepared text event."""
     timing_scope_token = None
@@ -136,6 +137,7 @@ async def dispatch_text_message(
             trusted_attachment_ids=trusted_attachment_ids,
             media_events=media_events,
             queued_notice_reservation=queued_notice_reservation,
+            on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
         )
     finally:
         if queued_notice_reservation is not None:
@@ -337,6 +339,7 @@ async def _apply_turn_plan(
     trusted_attachment_ids: list[str],
     media_events: list[MediaDispatchEvent] | None,
     queued_notice_reservation: QueuedHumanNoticeReservation | None,
+    on_lifecycle_lock_acquired: Callable[[], None] | None,
 ) -> None:
     if plan.kind == "ignore":
         if plan.ignore_reason == "router":
@@ -377,6 +380,7 @@ async def _apply_turn_plan(
         handled_turn=handled_turn,
         matrix_run_metadata=controller.deps.turn_store.build_run_metadata(handled_turn),
         queued_notice_reservation=queued_notice_reservation,
+        on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
     )
 
 

@@ -676,7 +676,7 @@ async def test_text_first_image_during_debounce_dispatches_without_upload_grace_
         )
         await _wait_for(lambda: calls == [(["$m1", "$img1"], 1)], deadline_seconds=1.0)
 
-    assert _coalescing_gate_is_idle(bot._coalescing_gate)
+    await _wait_for(lambda: _coalescing_gate_is_idle(bot._coalescing_gate))
 
 
 @pytest.mark.asyncio
@@ -1340,7 +1340,7 @@ async def test_already_queued_command_barrier_flushes_normal_without_debounce() 
 
     await _wait_for(lambda: calls == [["$m1"], ["$cmd"]], deadline_seconds=0.2)
 
-    assert _coalescing_gate_is_idle(gate)
+    await _wait_for(lambda: _coalescing_gate_is_idle(gate))
 
 
 @pytest.mark.asyncio
@@ -1825,7 +1825,7 @@ async def test_in_flight_command_barrier_flushes_buffered_normal_without_debounc
     release_first_dispatch.set()
     await _wait_for(lambda: calls == [["$m1"], ["$m2"], ["$cmd"]], deadline_seconds=0.2)
 
-    assert _coalescing_gate_is_idle(gate)
+    await _wait_for(lambda: _coalescing_gate_is_idle(gate))
 
 
 @pytest.mark.asyncio
@@ -1864,7 +1864,7 @@ async def test_command_during_active_dispatch_preserves_fifo_order() -> None:
     release_first_dispatch.set()
     await _wait_for(lambda: calls == [["$m1"], ["$m2"], ["$cmd"], ["$m3"]])
 
-    assert _coalescing_gate_is_idle(gate)
+    await _wait_for(lambda: _coalescing_gate_is_idle(gate))
 
 
 @pytest.mark.asyncio
@@ -1896,7 +1896,7 @@ async def test_room_scope_text_then_voice_live_debounce_coalesces_receive_time()
     await gate.drain_all()
 
     assert calls == [["$text", "$voice"]]
-    assert _coalescing_gate_is_idle(gate)
+    await _wait_for(lambda: _coalescing_gate_is_idle(gate))
 
 
 @pytest.mark.asyncio
@@ -1944,7 +1944,7 @@ async def test_room_scope_text_then_pending_voice_waits_for_voice_class_admissio
 
     release_voice.set()
     await _wait_for(lambda: calls == [["$text", "$voice"]], deadline_seconds=0.2)
-    assert _coalescing_gate_is_idle(gate)
+    await _wait_for(lambda: _coalescing_gate_is_idle(gate))
 
 
 @pytest.mark.asyncio
@@ -1995,7 +1995,7 @@ async def test_late_same_thread_text_does_not_join_expired_debounce_while_waitin
     release_voice.set()
     await gate.drain_all()
     assert calls == [["$typed1", "$voice"], ["$typed2"]]
-    assert _coalescing_gate_is_idle(gate)
+    await _wait_for(lambda: _coalescing_gate_is_idle(gate))
 
 
 @pytest.mark.asyncio
@@ -2043,7 +2043,7 @@ async def test_front_command_does_not_wait_for_later_unresolved_voice() -> None:
     release_voice.set()
     await gate.drain_all()
     assert calls == [["$cmd"], ["$voice"]]
-    assert _coalescing_gate_is_idle(gate)
+    await _wait_for(lambda: _coalescing_gate_is_idle(gate))
 
 
 @pytest.mark.asyncio
@@ -2086,7 +2086,7 @@ async def test_interrupted_claimed_admission_is_retried_on_next_drain() -> None:
     await gate.drain_all()
 
     assert calls == [["$first", "$second"]]
-    assert _coalescing_gate_is_idle(gate)
+    await _wait_for(lambda: _coalescing_gate_is_idle(gate))
 
 
 @pytest.mark.asyncio
@@ -2141,7 +2141,7 @@ async def test_voice_handoff_buffers_same_thread_followups_while_in_flight() -> 
 
     release_voice_dispatch.set()
     await _wait_for(lambda: calls == [["$voice"], ["$followup"]], deadline_seconds=0.2)
-    assert _coalescing_gate_is_idle(gate)
+    await _wait_for(lambda: _coalescing_gate_is_idle(gate))
 
 
 @pytest.mark.asyncio
@@ -2193,7 +2193,7 @@ async def test_voice_before_text_uses_stable_admission_key() -> None:
 
     release_voice.set()
     await _wait_for(lambda: calls == [(resolved_key, ["$voice", "$typed"])], deadline_seconds=0.2)
-    assert _coalescing_gate_is_idle(gate)
+    await _wait_for(lambda: _coalescing_gate_is_idle(gate))
 
 
 @pytest.mark.asyncio
@@ -2245,7 +2245,7 @@ async def test_text_before_voice_uses_stable_admission_key() -> None:
 
     release_voice.set()
     await _wait_for(lambda: calls == [(resolved_key, ["$typed", "$voice"])], deadline_seconds=0.2)
-    assert _coalescing_gate_is_idle(gate)
+    await _wait_for(lambda: _coalescing_gate_is_idle(gate))
 
 
 @pytest.mark.asyncio
@@ -2303,7 +2303,7 @@ async def test_same_thread_followup_after_voice_claim_stays_on_admitted_gate() -
         (admitted_key, ["$voice"]),
         (admitted_key, ["$typed"]),
     ]
-    assert _coalescing_gate_is_idle(gate)
+    await _wait_for(lambda: _coalescing_gate_is_idle(gate))
 
 
 @pytest.mark.asyncio
@@ -2354,7 +2354,7 @@ async def test_plain_reply_voice_resolution_batches_related_text() -> None:
 
     release_voice.set()
     await _wait_for(lambda: calls == [["$voice", "$typed"]], deadline_seconds=0.2)
-    assert _coalescing_gate_is_idle(gate)
+    await _wait_for(lambda: _coalescing_gate_is_idle(gate))
 
 
 @pytest.mark.asyncio
@@ -2407,7 +2407,7 @@ async def test_text_first_waits_for_plain_reply_voice_ready_during_debounce() ->
 
     release_voice.set()
     await _wait_for(lambda: calls == [["$typed", "$voice"]], deadline_seconds=0.2)
-    assert _coalescing_gate_is_idle(gate)
+    await _wait_for(lambda: _coalescing_gate_is_idle(gate))
 
 
 @pytest.mark.asyncio
@@ -2460,7 +2460,7 @@ async def test_later_different_thread_voice_does_not_hold_earlier_text() -> None
 
     release_voice.set()
     await _wait_for(lambda: calls == [["$typed"], ["$voice"]], deadline_seconds=0.2)
-    assert _coalescing_gate_is_idle(gate)
+    await _wait_for(lambda: _coalescing_gate_is_idle(gate))
 
 
 @pytest.mark.asyncio
@@ -2498,7 +2498,7 @@ async def test_failed_room_voice_does_not_coalesce_surviving_room_roots() -> Non
     await gate.drain_all()
 
     assert calls == [["$first"], ["$second"]]
-    assert _coalescing_gate_is_idle(gate)
+    await _wait_for(lambda: _coalescing_gate_is_idle(gate))
 
 
 @pytest.mark.asyncio
@@ -2549,7 +2549,7 @@ async def test_command_after_pending_voice_waits_for_same_resolved_thread() -> N
 
     release_voice.set()
     await _wait_for(lambda: calls == [["$voice"], ["$cmd"]], deadline_seconds=0.2)
-    assert _coalescing_gate_is_idle(gate)
+    await _wait_for(lambda: _coalescing_gate_is_idle(gate))
 
 
 @pytest.mark.asyncio
@@ -2608,7 +2608,7 @@ async def test_voice_admissions_resolving_to_different_threads_do_not_coalesce()
         (first_key, ["$voice1"]),
         (second_key, ["$voice2"]),
     ]
-    assert _coalescing_gate_is_idle(gate)
+    await _wait_for(lambda: _coalescing_gate_is_idle(gate))
 
 
 @pytest.mark.asyncio
@@ -2668,7 +2668,7 @@ async def test_pending_thread_voice_does_not_capture_unrelated_thread_text() -> 
         ),
         deadline_seconds=0.2,
     )
-    assert _coalescing_gate_is_idle(gate)
+    await _wait_for(lambda: _coalescing_gate_is_idle(gate))
 
 
 @pytest.mark.asyncio
@@ -2705,7 +2705,7 @@ async def test_room_scope_voice_burst_coalesces_under_null_thread_key() -> None:
     await gate.drain_all()
 
     assert calls == [["$voice1", "$voice2"]]
-    assert _coalescing_gate_is_idle(gate)
+    await _wait_for(lambda: _coalescing_gate_is_idle(gate))
 
 
 @pytest.mark.asyncio
@@ -2757,7 +2757,7 @@ async def test_deferred_room_scope_voice_burst_stays_one_turn_under_null_thread_
     await gate.drain_all()
 
     assert calls == [(key, ["$voice1", "$voice2"])]
-    assert _coalescing_gate_is_idle(gate)
+    await _wait_for(lambda: _coalescing_gate_is_idle(gate))
 
 
 @pytest.mark.asyncio
@@ -2819,7 +2819,7 @@ async def test_enqueue_for_dispatch_returns_while_drain_dispatch_blocks(tmp_path
         release_first_dispatch.set()
         await _wait_for(lambda: calls == [["$m1"], ["$m2"]])
 
-    assert _coalescing_gate_is_idle(bot._coalescing_gate)
+    await _wait_for(lambda: _coalescing_gate_is_idle(bot._coalescing_gate))
 
 
 def test_automation_source_kinds_are_coalescing_exempt() -> None:
@@ -2987,7 +2987,7 @@ async def test_bypass_preserves_fifo_order_behind_existing_normal_work() -> None
 
     await _wait_for(lambda: calls == [["$m1"], ["$hook"], ["$m2"]])
 
-    assert _coalescing_gate_is_idle(gate)
+    await _wait_for(lambda: _coalescing_gate_is_idle(gate))
 
 
 @pytest.mark.asyncio
@@ -3036,7 +3036,7 @@ async def test_room_mode_voice_queued_notice_is_solo_barrier_before_nearby_norma
 
     assert calls == [["$voice-room"], ["$normal"]]
     reservation.cancel.assert_not_called()
-    assert _coalescing_gate_is_idle(gate)
+    await _wait_for(lambda: _coalescing_gate_is_idle(gate))
 
 
 @pytest.mark.asyncio
@@ -3153,7 +3153,7 @@ async def test_prepare_for_sync_shutdown_waits_for_active_flush_task(tmp_path: P
         await shutdown_task
 
     assert calls == [["$m1"]]
-    assert _coalescing_gate_is_idle(bot._coalescing_gate)
+    await _wait_for(lambda: _coalescing_gate_is_idle(bot._coalescing_gate))
 
 
 @pytest.mark.asyncio
@@ -3187,7 +3187,7 @@ async def test_prepare_for_sync_shutdown_drains_pending_debounced_messages(tmp_p
         await bot.prepare_for_sync_shutdown()
 
     assert calls == [("hello", ["$m1"])]
-    assert _coalescing_gate_is_idle(bot._coalescing_gate)
+    await _wait_for(lambda: _coalescing_gate_is_idle(bot._coalescing_gate))
 
 
 @pytest.mark.asyncio
@@ -3225,7 +3225,7 @@ async def test_prepare_for_sync_shutdown_drains_pending_upload_grace(tmp_path: P
         await bot.prepare_for_sync_shutdown()
 
     assert calls == [("hello", ["$m1"])]
-    assert _coalescing_gate_is_idle(bot._coalescing_gate)
+    await _wait_for(lambda: _coalescing_gate_is_idle(bot._coalescing_gate))
 
 
 @pytest.mark.asyncio
@@ -3283,7 +3283,7 @@ async def test_shutdown_during_in_flight_dispatch_does_not_start_grace(tmp_path:
         await shutdown_task
 
     assert calls == [("first", ["$m1"]), ("second", ["$m2"])]
-    assert _coalescing_gate_is_idle(bot._coalescing_gate)
+    await _wait_for(lambda: _coalescing_gate_is_idle(bot._coalescing_gate))
 
 
 @pytest.mark.asyncio
@@ -3344,7 +3344,7 @@ async def test_thread_followups_wait_behind_first_turn_root_in_flight(tmp_path: 
         await _wait_for(lambda: calls == [["$m1"], ["$m2", "$m3"]])
 
     assert calls == [["$m1"], ["$m2", "$m3"]]
-    assert _coalescing_gate_is_idle(bot._coalescing_gate)
+    await _wait_for(lambda: _coalescing_gate_is_idle(bot._coalescing_gate))
 
 
 @pytest.mark.asyncio
@@ -3796,6 +3796,41 @@ async def test_coalesced_room_plain_reply_target_uses_prompt_thread_not_reply_th
     assert dispatches[0].context.thread_id is None
 
 
+@pytest.mark.asyncio
+async def test_handle_coalesced_batch_threads_response_start_signal_to_executor(tmp_path: Path) -> None:
+    """The batch's response-start signal must reach the response executor as the lock callback."""
+    bot = _make_bot(tmp_path, debounce_ms=0, upload_grace_ms=0)
+    room = _make_room()
+    batch = build_coalesced_batch(
+        CoalescingKey(room.room_id, None, "@user:localhost"),
+        [
+            PendingEvent(
+                event=_text_event(event_id="$m1", body="hello"),
+                room=room,
+                source_kind="message",
+            ),
+        ],
+    )
+    captured: list[Callable[[], None] | None] = []
+
+    async def record_response(*_args: object, **kwargs: object) -> None:
+        captured.append(cast("Callable[[], None] | None", kwargs.get("on_lifecycle_lock_acquired")))
+
+    with (
+        patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(return_value=_respond_dispatch_plan())),
+        patch.object(bot._turn_controller, "_execute_response_action", new=AsyncMock(side_effect=record_response)),
+    ):
+        await bot._turn_controller.handle_coalesced_batch(batch)
+
+    assert len(captured) == 1
+    assert captured[0] is not None
+    assert batch.response_start.started is False
+
+    captured[0]()
+
+    assert batch.response_start.started is True
+
+
 def test_single_mentioned_followup_batch_uses_coalescing_thread_relation() -> None:
     """Mentions must not preserve an explicit stale thread relation."""
     room = _make_room()
@@ -4018,7 +4053,7 @@ async def test_flush_logs_failed_outcome_when_dispatch_batch_raises() -> None:
             ),
         )
         await gate.drain_all()
-        assert _coalescing_gate_is_idle(gate)
+        await _wait_for(lambda: _coalescing_gate_is_idle(gate))
 
     flush_calls = [call for call in mock_emit.call_args_list if call.args and call.args[0] == "coalescing_gate.flush"]
     assert len(flush_calls) == 1
@@ -4134,7 +4169,7 @@ async def test_timer_flush_logs_dispatch_failure_without_unhandled_task() -> Non
     assert mock_exception.call_args.kwargs["error_message"] == "Coalesced dispatch failed."
     assert "pending_count" in mock_exception.call_args.kwargs
     assert "oldest_pending_age_ms" in mock_exception.call_args.kwargs
-    assert _coalescing_gate_is_idle(gate)
+    await _wait_for(lambda: _coalescing_gate_is_idle(gate))
 
 
 @pytest.mark.asyncio
@@ -4169,7 +4204,7 @@ async def test_failed_drain_does_not_poison_future_ingress() -> None:
         )
         await _wait_for(lambda: mock_exception.called)
 
-    assert _coalescing_gate_is_idle(gate)
+    await _wait_for(lambda: _coalescing_gate_is_idle(gate))
 
     await _admit_ready(
         gate,
@@ -4182,7 +4217,7 @@ async def test_failed_drain_does_not_poison_future_ingress() -> None:
     )
     await _wait_for(lambda: dispatched_source_event_ids == [["$m2"]])
 
-    assert _coalescing_gate_is_idle(gate)
+    await _wait_for(lambda: _coalescing_gate_is_idle(gate))
 
 
 @pytest.mark.asyncio
@@ -4234,7 +4269,7 @@ async def test_failed_drain_dispatches_buffered_ingress_without_waiting_for_anot
         await _wait_for(lambda: mock_exception.called)
         await _wait_for(lambda: dispatched_source_event_ids == [["$m2"]])
 
-    assert _coalescing_gate_is_idle(gate)
+    await _wait_for(lambda: _coalescing_gate_is_idle(gate))
 
 
 @pytest.mark.asyncio
@@ -4275,7 +4310,7 @@ async def test_cancelled_drain_cleans_state_for_later_message() -> None:
     drain_task.cancel()
     await asyncio.gather(drain_task, return_exceptions=True)
 
-    assert _coalescing_gate_is_idle(gate)
+    await _wait_for(lambda: _coalescing_gate_is_idle(gate))
 
     await _admit_ready(
         gate,
@@ -4288,7 +4323,7 @@ async def test_cancelled_drain_cleans_state_for_later_message() -> None:
     )
     await _wait_for(lambda: dispatched_source_event_ids == [["$m1"], ["$m2"]])
 
-    assert _coalescing_gate_is_idle(gate)
+    await _wait_for(lambda: _coalescing_gate_is_idle(gate))
 
 
 @pytest.mark.asyncio
@@ -4339,7 +4374,7 @@ async def test_cancelled_drain_dispatches_buffered_ingress_without_waiting_for_a
     await asyncio.gather(drain_task, return_exceptions=True)
     await _wait_for(lambda: dispatched_source_event_ids == [["$m1"], ["$m2"]])
 
-    assert _coalescing_gate_is_idle(gate)
+    await _wait_for(lambda: _coalescing_gate_is_idle(gate))
 
 
 @pytest.mark.asyncio
@@ -4405,7 +4440,7 @@ async def test_cleanup_drains_pending_debounce_tasks(tmp_path: Path) -> None:
         await bot.cleanup()
 
     mock_dispatch.assert_awaited_once()
-    assert _coalescing_gate_is_idle(bot._coalescing_gate)
+    await _wait_for(lambda: _coalescing_gate_is_idle(bot._coalescing_gate))
 
 
 @pytest.mark.asyncio
@@ -4548,7 +4583,7 @@ async def test_zero_debounce_dispatches_immediately(tmp_path: Path) -> None:
         await _wait_for(lambda: len(calls) == 1)
 
     assert calls == [("immediate", ["$m1"])]
-    assert _coalescing_gate_is_idle(bot._coalescing_gate)
+    await _wait_for(lambda: _coalescing_gate_is_idle(bot._coalescing_gate))
 
 
 @pytest.mark.asyncio
@@ -4603,7 +4638,7 @@ async def test_gate_entry_removed_after_dispatch_with_no_pending(tmp_path: Path)
     event = _text_event(event_id="$m1", body="hello")
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()):
-        assert _coalescing_gate_is_idle(bot._coalescing_gate)
+        await _wait_for(lambda: _coalescing_gate_is_idle(bot._coalescing_gate))
         await _enqueue_for_dispatch(
             bot,
             event,
@@ -4613,7 +4648,7 @@ async def test_gate_entry_removed_after_dispatch_with_no_pending(tmp_path: Path)
         )
         await _wait_for(lambda: _coalescing_gate_is_idle(bot._coalescing_gate))
 
-    assert _coalescing_gate_is_idle(bot._coalescing_gate)
+    await _wait_for(lambda: _coalescing_gate_is_idle(bot._coalescing_gate))
 
 
 # ---------------------------------------------------------------------------

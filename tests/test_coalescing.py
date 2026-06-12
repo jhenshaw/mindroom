@@ -2066,6 +2066,196 @@ async def test_messages_in_different_threads_do_not_coalesce() -> None:
 
 
 @pytest.mark.asyncio
+async def test_second_root_batch_dispatches_once_first_response_starts() -> None:
+    """A later top-level batch must wait only for the previous response to start, not finish."""
+    dispatched: list[list[str]] = []
+    first_response_running = asyncio.Event()
+    release_first_response = asyncio.Event()
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        dispatched.append(list(batch.source_event_ids))
+        if batch.source_event_ids == ["$first:localhost"]:
+            batch.response_start.mark_started()
+            first_response_running.set()
+            await release_first_response.wait()
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    key = CoalescingKey("!room:localhost", None, "@user:localhost")
+
+    await _admit_ready(gate, key, _pending(_text_event("$first:localhost", "first", 1_000_000)))
+    await asyncio.wait_for(first_response_running.wait(), timeout=1.0)
+    await _admit_ready(gate, key, _pending(_text_event("$second:localhost", "second", 1_000_600)))
+
+    await _wait_for(lambda: dispatched == [["$first:localhost"], ["$second:localhost"]])
+
+    assert not release_first_response.is_set()
+
+    release_first_response.set()
+    result = await gate.drain_all()
+
+    assert result.completed is True
+    assert dispatched == [["$first:localhost"], ["$second:localhost"]]
+
+
+@pytest.mark.asyncio
+async def test_thread_reply_dispatches_while_root_response_is_running() -> None:
+    """A reply in the thread rooted at an in-flight root turn waits only for response start."""
+    dispatched: list[list[str]] = []
+    root_response_running = asyncio.Event()
+    release_root_response = asyncio.Event()
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        dispatched.append(list(batch.source_event_ids))
+        if batch.source_event_ids == ["$root:localhost"]:
+            batch.response_start.mark_started()
+            root_response_running.set()
+            await release_root_response.wait()
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    root_key = CoalescingKey("!room:localhost", None, "@user:localhost")
+    thread_key = CoalescingKey("!room:localhost", "$root:localhost", "@user:localhost")
+
+    await _admit_ready(gate, root_key, _pending(_text_event("$root:localhost", "root", 1_000_000)))
+    await asyncio.wait_for(root_response_running.wait(), timeout=1.0)
+    await _admit_ready(gate, thread_key, _pending(_text_event("$reply:localhost", "thread reply", 1_000_001)))
+
+    await _wait_for(lambda: dispatched == [["$root:localhost"], ["$reply:localhost"]])
+
+    assert not release_root_response.is_set()
+
+    release_root_response.set()
+    await gate.drain_all()
+
+    assert dispatched == [["$root:localhost"], ["$reply:localhost"]]
+
+
+@pytest.mark.asyncio
+async def test_drain_all_waits_for_started_dispatch_to_complete() -> None:
+    """An unbounded drain must still flush responses that already released the gate."""
+    response_running = asyncio.Event()
+    release_response = asyncio.Event()
+    finished: list[list[str]] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batch.response_start.mark_started()
+        response_running.set()
+        await release_response.wait()
+        finished.append(list(batch.source_event_ids))
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    key = CoalescingKey("!room:localhost", None, "@user:localhost")
+
+    await _admit_ready(gate, key, _pending(_text_event("$text:localhost", "typed", 1_000_000)))
+    await asyncio.wait_for(response_running.wait(), timeout=1.0)
+
+    drain_task = asyncio.create_task(gate.drain_all())
+    await asyncio.sleep(0.01)
+    assert drain_task.done() is False
+
+    release_response.set()
+    result = await asyncio.wait_for(drain_task, timeout=1.0)
+
+    assert result.completed is True
+    assert finished == [["$text:localhost"]]
+
+
+@pytest.mark.asyncio
+async def test_bounded_drain_cancels_started_dispatch_and_reports_incomplete() -> None:
+    """A bounded drain must cancel a still-running started response instead of hanging."""
+    response_running = asyncio.Event()
+    release_response = asyncio.Event()
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batch.response_start.mark_started()
+        response_running.set()
+        await release_response.wait()
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: True,
+    )
+    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
+
+    await _admit_ready(gate, key, _pending(_text_event("$text:localhost", "typed", 1_000_000)))
+    await asyncio.wait_for(response_running.wait(), timeout=1.0)
+
+    drain_task = asyncio.create_task(gate.drain_all(ready_timeout_seconds=0.01))
+    try:
+        result = await asyncio.wait_for(asyncio.shield(drain_task), timeout=0.5)
+    except TimeoutError:  # pragma: no cover - documents the failure mode on regression
+        pytest.fail("bounded drain hung behind a started dispatch")
+    finally:
+        release_response.set()
+        if not drain_task.done():
+            drain_task.cancel()
+            await asyncio.gather(drain_task, return_exceptions=True)
+
+    assert result.completed is False
+    assert result.dispatch_cancelled_count == 1
+
+
+@pytest.mark.asyncio
+async def test_started_dispatch_failure_closes_segment_metadata() -> None:
+    """A response that fails after releasing the gate must still close gate-owned metadata."""
+    response_running = asyncio.Event()
+    release_response = asyncio.Event()
+    metadata_closed = asyncio.Event()
+    close_count = 0
+
+    def close() -> None:
+        nonlocal close_count
+        close_count += 1
+        metadata_closed.set()
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batch.response_start.mark_started()
+        response_running.set()
+        await release_response.wait()
+        msg = "response failed after start"
+        raise RuntimeError(msg)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
+    pending = _pending(_text_event("$text:localhost", "typed", 1_000_000))
+    pending.dispatch_metadata = (PendingDispatchMetadata(kind="test", payload=object(), close=close),)
+
+    await gate.admit(key, ready_result=ReadyPendingEvent(pending_event=pending))
+    await asyncio.wait_for(response_running.wait(), timeout=1.0)
+
+    release_response.set()
+    # Failure handling logs the exception with rendered locals, which can hold
+    # the loop well past a tight polling deadline; wait on the close signal.
+    await asyncio.wait_for(metadata_closed.wait(), timeout=5.0)
+
+    result = await gate.drain_all()
+
+    assert result.completed is True
+    assert close_count == 1
+
+
+@pytest.mark.asyncio
 async def test_drain_all_flushes_pending_debounced_work_and_idles_gate() -> None:
     """Shutdown drain dispatches queued work without waiting out the debounce window."""
     batches: list[CoalescedBatch] = []

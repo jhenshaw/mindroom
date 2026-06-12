@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol, TypeGuard, cast
 
@@ -60,6 +61,32 @@ type TextDispatchEvent = nio.RoomMessageText | PreparedTextEvent
 type DispatchEvent = TextDispatchEvent | MediaDispatchEvent
 
 
+@dataclass(eq=False)
+class ResponseStartSignal:
+    """One-way signal set when the response runner takes ownership of a dispatched batch.
+
+    Ingress ordering (the coalescing gate) only needs to hold a batch until its
+    target is resolved and the per-thread response lock is held; response
+    execution can take minutes and must not extend that ordering hold. The
+    executor marks this signal at lock acquisition so the gate can release.
+    """
+
+    _started: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+
+    def mark_started(self) -> None:
+        """Record that the response runner owns this batch's response turn."""
+        self._started.set()
+
+    @property
+    def started(self) -> bool:
+        """Return whether the batch's response has started."""
+        return self._started.is_set()
+
+    async def wait_started(self) -> None:
+        """Wait until the batch's response has started."""
+        await self._started.wait()
+
+
 @dataclass
 class PendingDispatchMetadata:
     """Opaque metadata that must be closed if claimed work cannot dispatch."""
@@ -108,6 +135,7 @@ class DispatchHandoff:
     source_event_prompts: Mapping[str, str] = field(default_factory=dict)
     media_events: tuple[MediaDispatchEvent, ...] = ()
     dispatch_metadata: tuple[PendingDispatchMetadata, ...] = ()
+    response_start: ResponseStartSignal | None = None
 
 
 def event_content_dict(event: DispatchEvent) -> dict[str, object] | None:
@@ -378,4 +406,5 @@ def build_dispatch_handoff(batch: CoalescedBatch) -> DispatchHandoff:
         source_event_prompts=dict(batch.source_event_prompts),
         media_events=tuple(batch.media_events),
         dispatch_metadata=batch.dispatch_metadata,
+        response_start=batch.response_start,
     )

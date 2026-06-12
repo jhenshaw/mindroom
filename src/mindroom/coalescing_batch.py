@@ -13,6 +13,7 @@ from .dispatch_handoff import (
     DispatchEvent,
     MediaDispatchEvent,
     PendingDispatchMetadata,
+    ResponseStartSignal,
     dispatch_prompt_for_event,
     event_content_dict,
     is_media_dispatch_event,
@@ -90,6 +91,7 @@ class CoalescedBatch:
     original_sender: str | None = None
     raw_audio_fallback: bool = False
     dispatch_metadata: tuple[PendingDispatchMetadata, ...] = ()
+    response_start: ResponseStartSignal = field(default_factory=ResponseStartSignal, compare=False)
 
 
 def _pending_event_trusts_internal_payload(pending_event: PendingEvent) -> bool:

@@ -119,7 +119,7 @@ from mindroom.turn_origin import (
 from mindroom.turn_policy import IngressHookRunner, PreparedDispatch, ResponseAction, TurnPolicy
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     import structlog
 
@@ -1716,6 +1716,7 @@ class TurnController:
         handled_turn: HandledTurnState,
         matrix_run_metadata: dict[str, Any] | None = None,
         queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
+        on_lifecycle_lock_acquired: Callable[[], None] | None = None,
     ) -> None:
         """Execute one final response path for a prepared dispatch action."""
         if room.room_id != dispatch.target.room_id:
@@ -1800,6 +1801,7 @@ class TurnController:
                             matrix_run_metadata=matrix_run_metadata,
                             requires_model_history_refresh=dispatch.context.requires_model_history_refresh,
                             payload_preparation=payload_preparation,
+                            on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
                             pipeline_timing=dispatch_timing,
                             queued_notice_reservation=queued_notice_reservation,
                         ),
@@ -1817,6 +1819,7 @@ class TurnController:
                             matrix_run_metadata=matrix_run_metadata,
                             requires_model_history_refresh=dispatch.context.requires_model_history_refresh,
                             payload_preparation=payload_preparation,
+                            on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
                             pipeline_timing=dispatch_timing,
                             queued_notice_reservation=queued_notice_reservation,
                         ),
@@ -1894,6 +1897,9 @@ class TurnController:
             ingress_metadata=handoff.ingress,
             payload_metadata=handoff.payload,
             trust_hydrated_internal_metadata=handoff.trust_hydrated_internal_metadata,
+            on_lifecycle_lock_acquired=(
+                None if handoff.response_start is None else handoff.response_start.mark_started
+            ),
         )
 
     async def handle_text_event(
@@ -2025,6 +2031,7 @@ class TurnController:
         ingress_metadata: DispatchIngressMetadata | None = None,
         payload_metadata: DispatchPayloadMetadata | None = None,
         trust_hydrated_internal_metadata: bool | None = None,
+        on_lifecycle_lock_acquired: Callable[[], None] | None = None,
     ) -> None:
         """Run the normal text or command dispatch pipeline for a prepared text event."""
         raw_event: TextDispatchEvent
@@ -2047,6 +2054,7 @@ class TurnController:
             ingress_metadata=ingress_metadata,
             payload_metadata=payload_metadata,
             trust_hydrated_internal_metadata=trust_hydrated_internal_metadata,
+            on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
         )
 
     async def handle_media_event(
