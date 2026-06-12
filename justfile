@@ -196,6 +196,11 @@ test-saas-backend *args:
 test-saas-frontend:
     cd saas-platform/platform-frontend && bun install && bun run test
 
+# Export the SaaS backend OpenAPI schema and regenerate the frontend's typed API definitions
+saas-api-types:
+    cd saas-platform/platform-backend && uv run python scripts/export_openapi.py
+    cd saas-platform/platform-frontend && bun install && bun run generate:api-types
+
 # Core frontend tests (vitest)
 # Run core frontend tests (vitest)
 test-front:
