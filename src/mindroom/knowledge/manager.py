@@ -440,51 +440,62 @@ def include_knowledge_relative_path(config: Config, base_id: str, relative_path:
     return include_semantic_knowledge_relative_path(config, base_id, relative_path)
 
 
-def _path_is_symlink_or_under_symlink(root: Path, path: Path) -> bool:
-    try:
-        relative_path = path.relative_to(root)
-    except ValueError:
-        return True
+@dataclass
+class _KnowledgePathFilter:
+    config: Config
+    base_id: str
+    root: Path
+    _directory_symlink_cache: dict[Path, bool] = field(default_factory=dict)
 
-    current = root
-    for part in relative_path.parts:
-        current = current / part
-        if current.is_symlink():
+    def include_file(self, file_path: Path, *, check_directory_symlinks: bool = True) -> bool:
+        """Return whether a file belongs to the active source set for one base."""
+        candidate = file_path if file_path.is_absolute() else self.root / file_path
+        try:
+            relative_path = candidate.relative_to(self.root)
+        except ValueError:
+            return False
+
+        if not include_knowledge_relative_path(self.config, self.base_id, relative_path.as_posix()):
+            return False
+        if check_directory_symlinks and self.directory_is_symlink_or_under_symlink(candidate.parent):
+            return False
+        if candidate.is_symlink():
+            return False
+        try:
+            resolved_candidate = candidate.resolve(strict=True)
+            resolved_candidate.relative_to(self.root)
+        except (OSError, ValueError):
+            return False
+        return candidate.is_file()
+
+    def directory_is_symlink_or_under_symlink(self, directory: Path) -> bool:
+        """Return whether a directory is outside root or reached through a symlink."""
+        try:
+            relative_path = directory.relative_to(self.root)
+        except ValueError:
             return True
-    return False
 
-
-def _include_knowledge_file(config: Config, base_id: str, knowledge_root: Path, file_path: Path) -> bool:
-    """Return whether a file belongs to the active source set for one base."""
-    root = knowledge_root.resolve()
-    candidate = file_path if file_path.is_absolute() else root / file_path
-    try:
-        candidate.relative_to(root)
-    except ValueError:
+        current = self.root
+        for part in relative_path.parts:
+            current = current / part
+            cached = self._directory_symlink_cache.get(current)
+            if cached is None:
+                cached = current.is_symlink()
+                self._directory_symlink_cache[current] = cached
+            if cached:
+                return True
         return False
-    if _path_is_symlink_or_under_symlink(root, candidate):
-        return False
-    try:
-        resolved_candidate = candidate.resolve(strict=True)
-        resolved_candidate.relative_to(root)
-    except (OSError, ValueError):
-        return False
-    if not candidate.is_file():
-        return False
-    relative_path = candidate.relative_to(root)
-    return include_knowledge_relative_path(config, base_id, relative_path.as_posix())
 
 
 def _add_listed_knowledge_file(
-    config: Config,
-    base_id: str,
-    root: Path,
+    path_filter: _KnowledgePathFilter,
     path: Path,
     *,
+    check_directory_symlinks: bool,
     files: list[Path],
     seen_paths: set[Path],
 ) -> None:
-    if not _include_knowledge_file(config, base_id, root, path):
+    if not path_filter.include_file(path, check_directory_symlinks=check_directory_symlinks):
         return
     resolved_path = path.resolve()
     if resolved_path in seen_paths:
@@ -494,32 +505,36 @@ def _add_listed_knowledge_file(
 
 
 def _collect_listing_target_files(
-    config: Config,
-    base_id: str,
-    root: Path,
+    path_filter: _KnowledgePathFilter,
     target: _ListingTarget,
     *,
     files: list[Path],
     seen_paths: set[Path],
 ) -> None:
-    def add_file(path: Path) -> None:
-        _add_listed_knowledge_file(config, base_id, root, path, files=files, seen_paths=seen_paths)
+    def add_file(path: Path, *, check_directory_symlinks: bool) -> None:
+        _add_listed_knowledge_file(
+            path_filter,
+            path,
+            check_directory_symlinks=check_directory_symlinks,
+            files=files,
+            seen_paths=seen_paths,
+        )
 
     if target.mode == "file":
-        add_file(target.path)
+        add_file(target.path, check_directory_symlinks=True)
         return
-    if not target.path.is_dir() or _path_is_symlink_or_under_symlink(root, target.path):
+    if not target.path.is_dir() or path_filter.directory_is_symlink_or_under_symlink(target.path):
         return
     if target.mode == "dir":
         for path in target.path.iterdir():
             if path.is_file():
-                add_file(path)
+                add_file(path, check_directory_symlinks=False)
         return
     for dirpath, dirnames, filenames in os.walk(target.path, followlinks=False):
         current_dir = Path(dirpath)
         dirnames[:] = [dirname for dirname in dirnames if not (current_dir / dirname).is_symlink()]
         for filename in filenames:
-            add_file(current_dir / filename)
+            add_file(current_dir / filename, check_directory_symlinks=False)
 
 
 def list_knowledge_files(config: Config, base_id: str, knowledge_root: Path) -> list[Path]:
@@ -528,11 +543,12 @@ def list_knowledge_files(config: Config, base_id: str, knowledge_root: Path) -> 
     if not root.is_dir():
         return []
 
+    path_filter = _KnowledgePathFilter(config=config, base_id=base_id, root=root)
     files: list[Path] = []
     seen_paths: set[Path] = set()
     include_patterns = config.get_knowledge_base_config(base_id).include_patterns
     for target in _listing_targets(root, include_patterns):
-        _collect_listing_target_files(config, base_id, root, target, files=files, seen_paths=seen_paths)
+        _collect_listing_target_files(path_filter, target, files=files, seen_paths=seen_paths)
     return sorted(files)
 
 
@@ -543,10 +559,11 @@ def _knowledge_file_paths_from_relative_paths(
     relative_paths: Iterable[str],
 ) -> list[Path]:
     root = knowledge_root.resolve()
+    path_filter = _KnowledgePathFilter(config=config, base_id=base_id, root=root)
     files: list[Path] = []
     for relative_path in sorted(set(relative_paths)):
         path = root / relative_path
-        if _include_knowledge_file(config, base_id, root, path):
+        if path_filter.include_file(path):
             files.append(path)
     return files
 
