@@ -22,7 +22,6 @@ from pydantic import BaseModel, Field
 from mindroom import model_loading, scheduling_executor
 from mindroom.authorization import responder_candidate_entities_for_room
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.hooks import build_hook_matrix_admin
 from mindroom.logging_config import bound_log_context, get_logger
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.mentions import parse_mentions_in_text
@@ -463,7 +462,6 @@ async def drain_deferred_overdue_tasks(
                 runtime_paths,
                 event_cache,
                 conversation_cache,
-                matrix_admin=build_hook_matrix_admin(client, runtime_paths),
             ):
                 drained_count += 1
         except Exception:
@@ -629,7 +627,7 @@ async def _put_scheduled_task_state_content(
     except Exception as exc:
         active_write_failure = f"{type(exc).__name__}: {exc!s}"
     else:
-        if not isinstance(response, nio.RoomPutStateError):
+        if isinstance(response, nio.RoomPutStateResponse):
             return
         active_write_failure = str(response)
 
@@ -1593,7 +1591,6 @@ async def restore_scheduled_tasks(  # noqa: C901
                             workflow=workflow,
                             status="failed",
                             created_at=task.created_at,
-                            matrix_admin=build_hook_matrix_admin(client, runtime_paths),
                         )
                     except Exception:
                         logger.exception("Failed to mark ancient task as failed", task_id=task_id)
@@ -1619,7 +1616,6 @@ async def restore_scheduled_tasks(  # noqa: C901
             runtime_paths,
             event_cache,
             conversation_cache,
-            matrix_admin=build_hook_matrix_admin(client, runtime_paths),
         ):
             restored_count += 1
 

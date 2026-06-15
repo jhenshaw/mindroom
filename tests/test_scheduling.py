@@ -2101,6 +2101,54 @@ async def test_schedule_task_returns_error_when_state_write_and_admin_fallback_f
 
 
 @pytest.mark.asyncio
+async def test_schedule_task_returns_error_when_active_write_returns_unexpected_response(tmp_path: Path) -> None:
+    """Scheduling must require a positive Matrix state-write response before returning success."""
+    client = AsyncMock()
+    client.room_put_state = AsyncMock(return_value=None)
+    room = _matrix_room("!test:server")
+    runtime_paths = _test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"assistant": AgentConfig(display_name="Assistant", role="Test assistant")},
+            models={"default": ModelConfig(provider="test", id="test-model")},
+        ),
+        runtime_paths,
+    )
+    ids = entity_ids(config, runtime_paths)
+    workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) + timedelta(minutes=5),
+        message="check logs",
+        description="check logs",
+    )
+
+    with (
+        patch("mindroom.scheduling.responder_candidate_entities_for_room", return_value=[ids["assistant"]]),
+        patch("mindroom.scheduling._extract_mentioned_agents_from_text", return_value=[]),
+        patch("mindroom.scheduling._parse_workflow_schedule", new=AsyncMock(return_value=workflow)),
+        patch("mindroom.scheduling._start_scheduled_task", return_value=True) as start_task,
+        patch("mindroom.scheduling.uuid.uuid4", return_value="taskweird"),
+    ):
+        task_id, message = await schedule_task(
+            runtime=_scheduling_runtime(
+                client=client,
+                config=config,
+                runtime_paths=runtime_paths,
+                room=room,
+            ),
+            room_id="!test:server",
+            thread_id="$thread",
+            scheduled_by="@alice:server",
+            full_text="in 5 minutes check logs",
+        )
+
+    assert task_id is None
+    assert "Failed to schedule" in message
+    assert "Failed to persist scheduled task state" in message
+    start_task.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_schedule_task_uses_configured_room_boundary_without_membership_refresh(tmp_path: Path) -> None:
     """Configured schedule rooms should use the static responder boundary without membership refresh."""
     client = AsyncMock()
