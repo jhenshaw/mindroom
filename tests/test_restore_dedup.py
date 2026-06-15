@@ -110,6 +110,10 @@ async def test_restore_marks_ancient_missed_task_as_failed() -> None:
         room_id="!r:server",
     )
     client.room_get_state = AsyncMock(return_value=response)
+    client.room_put_state.return_value = nio.RoomPutStateResponse.from_dict(
+        {"event_id": "$failed"},
+        room_id="!r:server",
+    )
 
     restored = await restore_scheduled_tasks(
         client,
