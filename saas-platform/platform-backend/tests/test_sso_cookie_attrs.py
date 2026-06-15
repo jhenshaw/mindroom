@@ -10,6 +10,7 @@ from tests.stripe_mock import create_stripe_mock
 sys.modules.setdefault("stripe", create_stripe_mock())
 
 import pytest  # noqa: E402
+from backend import config  # noqa: E402
 from backend.deps import Limiter, get_remote_address, limiter, verify_user  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from main import app  # noqa: E402
@@ -23,6 +24,11 @@ def clear_dependency_overrides():
 
 def _override_verify_user() -> dict[str, str]:
     return {"user_id": "test-user", "email": "test@example.com"}
+
+
+def _expected_cookie_domain() -> str:
+    domain = config.PLATFORM_DOMAIN.strip()
+    return domain if domain.startswith(".") else f".{domain}"
 
 
 def test_sso_cookie_has_security_flags() -> None:
@@ -45,8 +51,8 @@ def test_sso_cookie_has_security_flags() -> None:
     assert "samesite=lax" in set_cookie.lower()
 
 
-def test_sso_cookie_is_host_only() -> None:
-    """SSO token cookie must stay on the API host, not every tenant subdomain."""
+def test_sso_cookie_is_shared_with_tenant_subdomains() -> None:
+    """SSO token cookie must be visible to hosted tenant subdomains."""
     app.dependency_overrides[verify_user] = _override_verify_user
     app.state.limiter = Limiter(key_func=get_remote_address)
     app.state.limiter.reset()
@@ -61,12 +67,14 @@ def test_sso_cookie_is_host_only() -> None:
     cookies = response.headers.get_list("set-cookie")
     token_cookies = [cookie for cookie in cookies if cookie.startswith("mindroom_jwt=tok")]
     assert len(token_cookies) == 1
-    assert "Domain=" not in token_cookies[0]
-    assert all("Domain=" not in cookie for cookie in cookies)
+    assert f"domain={_expected_cookie_domain()}".lower() in token_cookies[0].lower()
+    assert any(
+        cookie.startswith("mindroom_jwt=") and "Domain=" not in cookie and "Max-Age=0" in cookie for cookie in cookies
+    )
 
 
-def test_clear_sso_cookie_clears_host_only_cookie() -> None:
-    """Logout clears the current host-only cookie."""
+def test_clear_sso_cookie_clears_domain_and_legacy_host_only_cookie() -> None:
+    """Logout clears the shared-domain cookie and the legacy host-only cookie."""
     app.state.limiter = Limiter(key_func=get_remote_address)
     app.state.limiter.reset()
     limiter.reset()
@@ -79,4 +87,9 @@ def test_clear_sso_cookie_clears_host_only_cookie() -> None:
     assert any(
         cookie.startswith("mindroom_jwt=") and "Domain=" not in cookie and "Max-Age=0" in cookie for cookie in cookies
     )
-    assert all("Domain=" not in cookie for cookie in cookies)
+    assert any(
+        cookie.startswith("mindroom_jwt=")
+        and f"domain={_expected_cookie_domain()}".lower() in cookie.lower()
+        and "Max-Age=0" in cookie
+        for cookie in cookies
+    )
