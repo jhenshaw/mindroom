@@ -148,6 +148,7 @@ class WorkspaceAutomationService:
     _loaded: dict[AutomationKey, _LoadedAutomationEntry] = field(default_factory=dict, init=False, repr=False)
     _tasks: dict[AutomationKey, asyncio.Task[None]] = field(default_factory=dict, init=False, repr=False)
     _run_status: dict[AutomationKey, _RunStatus] = field(default_factory=dict, init=False, repr=False)
+    _scan_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     _state_file_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     _context: _ServiceContext | None = field(default=None, init=False, repr=False)
     _scan_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
@@ -190,15 +191,16 @@ class WorkspaceAutomationService:
         conversation_cache: ConversationCacheProtocol,
     ) -> WorkspaceAutomationScanResult:
         """Refresh config-bound dependencies and reconcile loaded automations."""
-        context = self._require_context()
-        self._context = replace(
-            context,
-            config=config,
-            hook_registry=hook_registry,
-            bot_provider=bot_provider,
-            conversation_cache=conversation_cache,
-        )
-        return await self.scan_now()
+        async with self._scan_lock:
+            context = self._require_context()
+            self._context = replace(
+                context,
+                config=config,
+                hook_registry=hook_registry,
+                bot_provider=bot_provider,
+                conversation_cache=conversation_cache,
+            )
+            return await self._scan_now_locked()
 
     async def shutdown(self) -> None:
         """Cancel all background work and clear loaded runtime state."""
@@ -209,11 +211,12 @@ class WorkspaceAutomationService:
             scan_task.cancel()
             await asyncio.gather(scan_task, return_exceptions=True)
 
-        tasks = tuple(self._tasks.values())
-        self._tasks.clear()
-        self._loaded.clear()
-        self._run_status.clear()
-        self._context = None
+        async with self._scan_lock:
+            tasks = tuple(self._tasks.values())
+            self._tasks.clear()
+            self._loaded.clear()
+            self._run_status.clear()
+            self._context = None
         for task in tasks:
             task.cancel()
         if tasks:
@@ -221,6 +224,10 @@ class WorkspaceAutomationService:
 
     async def scan_now(self) -> WorkspaceAutomationScanResult:
         """Reload automation files and reconcile supervised cron loops."""
+        async with self._scan_lock:
+            return await self._scan_now_locked()
+
+    async def _scan_now_locked(self) -> WorkspaceAutomationScanResult:
         context = self._require_context()
         loaded_entries: dict[AutomationKey, _LoadedAutomationEntry] = {}
         errors: list[WorkspaceAutomationLoadError] = []

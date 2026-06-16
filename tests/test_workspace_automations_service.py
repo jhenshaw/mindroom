@@ -23,7 +23,7 @@ from mindroom.workspace_automations.models import (
     WorkspaceAutomationLoadResult,
     WorkspaceAutomationTrigger,
 )
-from mindroom.workspace_automations.service import WorkspaceAutomationService
+from mindroom.workspace_automations.service import AutomationKey, WorkspaceAutomationService
 from mindroom.workspace_automations.targets import WorkspaceAutomationTarget
 
 if TYPE_CHECKING:
@@ -506,6 +506,68 @@ async def test_refresh_cancels_loaded_automation_when_file_is_deleted(
 
     assert service.list_loaded() == ()
     assert task_recorder.tasks[0].done()
+
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_scans_do_not_lose_loaded_state_during_cancellation(
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale scan must not overwrite a newer scan after cancellation yields."""
+    config = _config(runtime_paths)
+    automation = _automation(tmp_path)
+    clock = _ControlledClock(datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC))
+    task_recorder = _TaskRecorder()
+    loader_result = WorkspaceAutomationLoadResult(automations=(automation,))
+    cancel_started = asyncio.Event()
+    release_cancel = asyncio.Event()
+
+    def automation_loader(**_kwargs: object) -> WorkspaceAutomationLoadResult:
+        return loader_result
+
+    service = WorkspaceAutomationService(
+        target_loader=lambda _config, _runtime_paths: [_target(tmp_path)],
+        automation_loader=automation_loader,
+        now=clock.current_time,
+        sleep=clock.sleep,
+        task_factory=task_recorder,
+        scan_interval_seconds=None,
+    )
+
+    await service.start(config, runtime_paths, HookRegistry.empty(), _bot_provider, object())
+    await clock.wait_for_sleep_count(1)
+
+    async def pausing_cancel_task(key: AutomationKey) -> None:
+        task = service._tasks.pop(key, None)
+        if task is None:
+            return
+        task.cancel()
+        cancel_started.set()
+        await release_cancel.wait()
+        await asyncio.gather(task, return_exceptions=True)
+
+    monkeypatch.setattr(service, "_cancel_task", pausing_cancel_task)
+
+    loader_result = WorkspaceAutomationLoadResult()
+    stale_scan = asyncio.create_task(service.scan_now())
+    await asyncio.wait_for(cancel_started.wait(), timeout=1)
+
+    loader_result = WorkspaceAutomationLoadResult(automations=(automation,))
+    fresh_scan = asyncio.create_task(service.scan_now())
+    await asyncio.sleep(0)
+
+    release_cancel.set()
+    await asyncio.wait_for(asyncio.gather(stale_scan, fresh_scan), timeout=1)
+
+    loaded = service.list_loaded()
+    assert [(item.agent_name, item.automation_id, item.workspace_root) for item in loaded] == [
+        ("ops", "urgent_email_poll", str(tmp_path)),
+    ]
+    active_tasks = [task for task in task_recorder.tasks if not task.done()]
+    assert len(active_tasks) == 1
 
     await service.shutdown()
 
