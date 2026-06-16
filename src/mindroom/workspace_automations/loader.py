@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import yaml
-from croniter import croniter
+from croniter import CroniterBadCronError, CroniterBadDateError, croniter
 from pydantic import ValidationError
 
 from mindroom.workspace_automations.models import (
@@ -185,7 +185,18 @@ def _policy_errors(
             ),
         )
 
-    interval_seconds = _minimum_schedule_interval_seconds(definition.schedule)
+    try:
+        interval_seconds = _minimum_schedule_interval_seconds(definition.schedule)
+    except (CroniterBadCronError, CroniterBadDateError) as exc:
+        errors.append(
+            WorkspaceAutomationLoadError(
+                file_path=file_path,
+                automation_id=automation_id,
+                field_path=("automations", automation_id, "schedule"),
+                message=f"schedule cannot produce any runs: {exc}",
+            ),
+        )
+        return errors
     if interval_seconds < policy.min_interval_seconds:
         errors.append(
             WorkspaceAutomationLoadError(

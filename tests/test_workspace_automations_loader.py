@@ -22,7 +22,7 @@ def _policy(
     return WorkspaceAutomationPolicyConfig(
         enabled=enabled,
         max_timeout_seconds=max_timeout_seconds,
-        allowed_actions=allowed_actions or ["agent_message", "matrix_message", "hook"],
+        allowed_actions=allowed_actions if allowed_actions is not None else ["agent_message", "matrix_message", "hook"],
     )
 
 
@@ -131,6 +131,44 @@ automations: {}
     assert "version" in result.errors[0].message
 
 
+def test_bool_version_returns_structured_error(tmp_path: Path) -> None:
+    """YAML booleans should not satisfy the required integer version."""
+    _write_automations(
+        tmp_path,
+        """
+version: true
+automations: {}
+""",
+    )
+
+    result = _load(tmp_path)
+
+    assert result.automations == ()
+    assert len(result.errors) == 1
+    assert result.errors[0].automation_id is None
+    assert result.errors[0].field_path == ("version",)
+    assert "integer 1" in result.errors[0].message
+
+
+def test_float_version_returns_structured_error(tmp_path: Path) -> None:
+    """YAML floats should not satisfy the required integer version."""
+    _write_automations(
+        tmp_path,
+        """
+version: 1.0
+automations: {}
+""",
+    )
+
+    result = _load(tmp_path)
+
+    assert result.automations == ()
+    assert len(result.errors) == 1
+    assert result.errors[0].automation_id is None
+    assert result.errors[0].field_path == ("version",)
+    assert "integer 1" in result.errors[0].message
+
+
 def test_invalid_automation_id_returns_structured_error(tmp_path: Path) -> None:
     """Automation IDs should be single path-safe identifiers."""
     _write_automations(
@@ -183,6 +221,33 @@ automations:
     assert result.errors[0].automation_id == "bad_schedule"
     assert result.errors[0].field_path == ("automations", "bad_schedule", "schedule")
     assert "five-field cron" in result.errors[0].message
+
+
+def test_impossible_schedule_returns_structured_error(tmp_path: Path) -> None:
+    """Schedules that cannot produce runs should return a structured loader error."""
+    _write_automations(
+        tmp_path,
+        """
+version: 1
+automations:
+  impossible_schedule:
+    schedule: "0 0 31 2 *"
+    check:
+      type: shell
+      command: "true"
+      timeout_seconds: 1
+    action:
+      type: none
+""",
+    )
+
+    result = _load(tmp_path)
+
+    assert result.automations == ()
+    assert len(result.errors) == 1
+    assert result.errors[0].automation_id == "impossible_schedule"
+    assert result.errors[0].field_path == ("automations", "impossible_schedule", "schedule")
+    assert "cannot produce" in result.errors[0].message
 
 
 def test_timeout_above_policy_limit_returns_structured_error(tmp_path: Path) -> None:
@@ -290,7 +355,10 @@ automations:
 """,
     )
 
-    result = _load(tmp_path, policy=_policy(allowed_actions=[]))
+    policy = _policy(allowed_actions=[])
+    assert policy.allowed_actions == []
+
+    result = _load(tmp_path, policy=policy)
 
     assert result.errors == ()
     assert len(result.automations) == 1

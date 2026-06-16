@@ -6,8 +6,8 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
-from croniter import croniter
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field
+from croniter import CroniterBadCronError, CroniterBadDateError, croniter
+from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -68,11 +68,24 @@ def _validate_schedule(value: str) -> str:
     if len(stripped.split()) != 5 or not croniter.is_valid(stripped):
         msg = "schedule must be a valid five-field cron expression"
         raise ValueError(msg)
+    try:
+        croniter(stripped).get_next()
+    except (CroniterBadCronError, CroniterBadDateError) as exc:
+        msg = "schedule cannot produce any runs"
+        raise ValueError(msg) from exc
     return stripped
+
+
+def _validate_version(value: object) -> int:
+    if type(value) is not int or value != 1:
+        msg = "version must be exactly integer 1"
+        raise ValueError(msg)
+    return value
 
 
 _ShellCommand = Annotated[str, AfterValidator(_validate_command)]
 _AutomationSchedule = Annotated[str, AfterValidator(_validate_schedule)]
+_AutomationFileVersion = Annotated[int, BeforeValidator(_validate_version)]
 _ActionRoom = Annotated[str | None, AfterValidator(_validate_room)]
 _ActionThreadId = Annotated[str | None, AfterValidator(_validate_thread_id)]
 _ActionMessage = Annotated[str | None, AfterValidator(_validate_message)]
@@ -125,7 +138,7 @@ class WorkspaceAutomationFile(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    version: Literal[1]
+    version: _AutomationFileVersion
     automations: dict[str, Any]
 
 
