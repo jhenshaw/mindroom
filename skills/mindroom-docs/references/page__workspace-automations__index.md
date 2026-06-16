@@ -26,6 +26,7 @@ Workspace automations are disabled by default.
 Enable them with `workspace_automations` in `defaults` or on an individual agent.
 The first version supports shared agent workspaces only.
 Private agents are skipped because requester-private automation identity is not supported yet.
+Shared agents that use `worker_scope: user` or `worker_scope: user_agent` are also skipped because unattended automation checks have no live requester identity.
 
 ```yaml
 defaults:

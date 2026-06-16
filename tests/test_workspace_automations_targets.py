@@ -181,6 +181,63 @@ def test_private_agents_are_skipped_with_a_clear_reason(
     assert "private workspace automations are not supported yet" in caplog.text
 
 
+@pytest.mark.parametrize("worker_scope", ["user", "user_agent"])
+def test_requester_scoped_agents_are_skipped_with_a_clear_reason(
+    caplog: pytest.LogCaptureFixture,
+    runtime_paths: RuntimePaths,
+    worker_scope: str,
+) -> None:
+    """Requester-scoped shared agents cannot run unattended automations safely."""
+    config = _config(
+        runtime_paths,
+        {
+            "ops": {
+                "display_name": "Ops",
+                "worker_scope": worker_scope,
+                "workspace_automations": {"enabled": True},
+            },
+        },
+    )
+    caplog.set_level("INFO", logger="mindroom.workspace_automations.targets")
+
+    result = iter_workspace_automation_targets(config, runtime_paths)
+
+    assert result == []
+    assert "Skipping workspace automation target for agent 'ops'" in caplog.text
+    assert f"worker_scope={worker_scope}" in caplog.text
+    assert "requester-scoped workspace automations require a live requester identity" in caplog.text
+
+
+def test_default_requester_scoped_agents_are_skipped_with_a_clear_reason(
+    caplog: pytest.LogCaptureFixture,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Inherited requester-scoped worker policies should also make automations ineligible."""
+    config = Config.validate_with_runtime(
+        {
+            "memory": {"backend": "none"},
+            "defaults": {
+                "worker_scope": "user",
+                "workspace_automations": {"enabled": True},
+            },
+            "agents": {
+                "ops": {
+                    "display_name": "Ops",
+                },
+            },
+        },
+        runtime_paths,
+    )
+    caplog.set_level("INFO", logger="mindroom.workspace_automations.targets")
+
+    result = iter_workspace_automation_targets(config, runtime_paths)
+
+    assert result == []
+    assert "Skipping workspace automation target for agent 'ops'" in caplog.text
+    assert "worker_scope=user" in caplog.text
+    assert "requester-scoped workspace automations require a live requester identity" in caplog.text
+
+
 def test_disabled_private_agents_do_not_log_private_unsupported_reason(
     caplog: pytest.LogCaptureFixture,
     runtime_paths: RuntimePaths,

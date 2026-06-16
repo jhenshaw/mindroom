@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 _PRIVATE_AGENT_SKIP_REASON = "private workspace automations are not supported yet"
+_REQUESTER_SCOPED_SKIP_REASON = "requester-scoped workspace automations require a live requester identity"
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,14 @@ def iter_workspace_automation_targets(
             _LOGGER.info(
                 "Skipping workspace automation target for agent '%s': no usable workspace resolved.",
                 agent_name,
+            )
+            continue
+        if agent_runtime.execution_scope in {"user", "user_agent"}:
+            _LOGGER.info(
+                "Skipping workspace automation target for agent '%s': worker_scope=%s; %s.",
+                agent_name,
+                agent_runtime.execution_scope,
+                _REQUESTER_SCOPED_SKIP_REASON,
             )
             continue
 
