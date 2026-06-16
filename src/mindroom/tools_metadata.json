@@ -8475,6 +8475,31 @@
       "agent_override_fields": null,
       "auth_provider": null,
       "category": "productivity",
+      "config_fields": null,
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "agno"
+      ],
+      "description": "Validate, list, and reload workspace-authored automations",
+      "display_name": "Workspace Automation",
+      "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "function_names": [
+        "list_automations",
+        "reload_automations",
+        "validate_automations"
+      ],
+      "helper_text": null,
+      "icon": "Workflow",
+      "icon_color": "text-indigo-500",
+      "name": "workspace_automation",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "productivity",
       "config_fields": [
         {
           "authored_override": true,

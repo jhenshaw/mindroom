@@ -76,7 +76,7 @@ from mindroom.tool_system.plugins import (
 )
 from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
 from mindroom.workers.runtime import clear_worker_validation_snapshot_cache, shutdown_primary_worker_manager
-from mindroom.workspace_automations.service import WorkspaceAutomationService
+from mindroom.workspace_automations.service import WorkspaceAutomationService, set_active_workspace_automation_service
 
 from . import file_watcher
 from .bot import AgentBot, TeamBot, create_bot_for_entity
@@ -334,6 +334,7 @@ class _MultiAgentOrchestrator:
             lambda agent_name: self.agent_bots.get(agent_name),
             conversation_cache,
         )
+        set_active_workspace_automation_service(self._workspace_automation_service)
 
     async def _refresh_workspace_automation_service(self, config: Config) -> None:
         """Refresh workspace automation supervision after config or hook-registry updates."""
@@ -1669,6 +1670,7 @@ class _MultiAgentOrchestrator:
         await shutdown_approval_runtime()
         await self.config_reload.cancel()
         await self._startup_maintenance.cancel()
+        set_active_workspace_automation_service(None)
         await self._workspace_automation_service.shutdown()
         await self._stop_memory_auto_flush_worker()
         await self._knowledge_source_watcher.shutdown()

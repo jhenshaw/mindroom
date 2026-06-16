@@ -464,9 +464,25 @@ def _write_json_file(path: Path, payload: Mapping[str, object]) -> None:
     path.write_text(f"{json.dumps(payload, indent=2, sort_keys=True)}\n", encoding="utf-8")
 
 
+_ACTIVE_WORKSPACE_AUTOMATION_SERVICE: WorkspaceAutomationService | None = None
+
+
+def set_active_workspace_automation_service(service: WorkspaceAutomationService | None) -> None:
+    """Set the currently live workspace automation service for management tools."""
+    global _ACTIVE_WORKSPACE_AUTOMATION_SERVICE
+    _ACTIVE_WORKSPACE_AUTOMATION_SERVICE = service
+
+
+def get_active_workspace_automation_service() -> WorkspaceAutomationService | None:
+    """Return the currently live workspace automation service, if one is active."""
+    return _ACTIVE_WORKSPACE_AUTOMATION_SERVICE
+
+
 __all__ = [
     "AutomationKey",
     "WorkspaceAutomationLoadedStatus",
     "WorkspaceAutomationScanResult",
     "WorkspaceAutomationService",
+    "get_active_workspace_automation_service",
+    "set_active_workspace_automation_service",
 ]
