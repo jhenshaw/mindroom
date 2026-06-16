@@ -9,11 +9,13 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal
 from croniter import CroniterBadCronError, CroniterBadDateError, croniter
 from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field
 
+from mindroom.config.models import WorkspaceAutomationActionName
+
 if TYPE_CHECKING:
     from pathlib import Path
 
 type _WorkspaceAutomationCheckType = Literal["shell"]
-type _WorkspaceAutomationActionType = Literal["none", "agent_message", "matrix_message", "hook"]
+type _WorkspaceAutomationActionType = Literal["none"] | WorkspaceAutomationActionName
 
 _AUTOMATION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 _MATRIX_EVENT_ID_PATTERN = re.compile(r"^\$[^\s]+$")

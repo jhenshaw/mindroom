@@ -42,7 +42,7 @@ def _load(
     return load_workspace_automations(
         agent_name="ops",
         workspace_root=workspace_root,
-        agent_rooms=rooms or ["Lobby"],
+        agent_rooms=rooms if rooms is not None else ["Lobby"],
         policy=policy or _policy(),
     )
 
@@ -63,6 +63,19 @@ def test_disabled_policy_returns_empty_result_without_reading_file(tmp_path: Pat
 
     assert result.automations == ()
     assert result.errors == ()
+
+
+def test_invalid_yaml_returns_structured_parse_error(tmp_path: Path) -> None:
+    """Invalid enabled automation YAML should return a structured parse error."""
+    _write_automations(tmp_path, "version: [1\n")
+
+    result = _load(tmp_path)
+
+    assert result.automations == ()
+    assert len(result.errors) == 1
+    assert result.errors[0].automation_id is None
+    assert result.errors[0].field_path == ()
+    assert "Could not parse automation YAML" in result.errors[0].message
 
 
 def test_valid_yaml_loads_normalized_automation(tmp_path: Path) -> None:
@@ -476,6 +489,35 @@ automations:
     assert result.automations == ()
     assert len(result.errors) == 1
     assert result.errors[0].field_path == ("automations", "ambiguous_room", "action", "room")
+    assert "room" in result.errors[0].message
+
+
+def test_visible_action_without_room_errors_when_agent_has_no_rooms(tmp_path: Path) -> None:
+    """Visible Matrix actions should not invent a room for agents with no rooms."""
+    _write_automations(
+        tmp_path,
+        """
+version: 1
+automations:
+  missing_room:
+    schedule: "*/1 * * * *"
+    check:
+      type: shell
+      command: "true"
+      timeout_seconds: 1
+    trigger:
+      exit_code: 0
+    action:
+      type: agent_message
+      message: "Done"
+""",
+    )
+
+    result = _load(tmp_path, rooms=[])
+
+    assert result.automations == ()
+    assert len(result.errors) == 1
+    assert result.errors[0].field_path == ("automations", "missing_room", "action", "room")
     assert "room" in result.errors[0].message
 
 
