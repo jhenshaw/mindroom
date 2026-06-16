@@ -231,20 +231,13 @@ class WorkspaceAutomationService:
 
     async def _scan_now_locked(self) -> WorkspaceAutomationScanResult:
         context = self._require_context()
-        loaded_entries: dict[AutomationKey, _LoadedAutomationEntry] = {}
-        errors: list[WorkspaceAutomationLoadError] = []
-
-        for target in self.target_loader(context.config, context.runtime_paths):
-            result = self.automation_loader(
-                agent_name=target.agent_name,
-                workspace_root=target.workspace_root,
-                agent_rooms=target.agent_configured_rooms,
-                policy=target.policy,
-            )
-            errors.extend(result.errors)
-            for automation in result.automations:
-                key = AutomationKey.from_loaded(automation)
-                loaded_entries[key] = _LoadedAutomationEntry(target=target, automation=automation)
+        loaded_entries, errors = await asyncio.to_thread(
+            _load_automation_entries,
+            context.config,
+            context.runtime_paths,
+            self.target_loader,
+            self.automation_loader,
+        )
 
         self._log_load_errors(errors)
         await self._reconcile_tasks(loaded_entries)
@@ -283,9 +276,10 @@ class WorkspaceAutomationService:
 
     async def _reconcile_tasks(self, loaded_entries: Mapping[AutomationKey, _LoadedAutomationEntry]) -> None:
         removed_keys = set(self._loaded) - set(loaded_entries)
+        removed_status = False
         for key in sorted(removed_keys, key=AutomationKey.state_id):
             await self._cancel_task(key)
-            self._run_status.pop(key, None)
+            removed_status = self._run_status.pop(key, None) is not None or removed_status
 
         changed_schedule_keys = {
             key
@@ -304,6 +298,8 @@ class WorkspaceAutomationService:
                     self._automation_loop(key),
                     name=f"workspace_automation:{key.agent_name}:{key.automation_id}",
                 )
+        if removed_status:
+            await self._write_state_file()
 
     async def _cancel_task(self, key: AutomationKey) -> None:
         task = self._tasks.pop(key, None)
@@ -457,6 +453,30 @@ class WorkspaceAutomationService:
                 field_path=".".join(str(part) for part in error.field_path),
                 message=error.message,
             )
+
+
+def _load_automation_entries(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    target_loader: _TargetLoader,
+    automation_loader: _AutomationLoader,
+) -> tuple[dict[AutomationKey, _LoadedAutomationEntry], list[WorkspaceAutomationLoadError]]:
+    loaded_entries: dict[AutomationKey, _LoadedAutomationEntry] = {}
+    errors: list[WorkspaceAutomationLoadError] = []
+
+    for target in target_loader(config, runtime_paths):
+        result = automation_loader(
+            agent_name=target.agent_name,
+            workspace_root=target.workspace_root,
+            agent_rooms=target.agent_configured_rooms,
+            policy=target.policy,
+        )
+        errors.extend(result.errors)
+        for automation in result.automations:
+            key = AutomationKey.from_loaded(automation)
+            loaded_entries[key] = _LoadedAutomationEntry(target=target, automation=automation)
+
+    return loaded_entries, errors
 
 
 def _trigger_payload(automation: LoadedWorkspaceAutomation) -> dict[str, Any]:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -24,7 +25,12 @@ from mindroom.workspace_automations.models import (
     WorkspaceAutomationLoadResult,
     WorkspaceAutomationTrigger,
 )
-from mindroom.workspace_automations.service import AutomationKey, WorkspaceAutomationService, _write_json_file
+from mindroom.workspace_automations.service import (
+    AutomationKey,
+    WorkspaceAutomationService,
+    _RunStatus,
+    _write_json_file,
+)
 from mindroom.workspace_automations.targets import WorkspaceAutomationTarget
 
 if TYPE_CHECKING:
@@ -214,6 +220,34 @@ async def test_start_scans_targets_and_schedules_loaded_automation(
     assert target_calls == [(config, runtime_paths)]
     assert loader_calls == [("ops", tmp_path)]
     assert len(task_recorder.tasks) == 1
+
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_scan_loads_workspace_files_off_event_loop(
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """Synchronous target and YAML loading should not run on the event-loop thread."""
+    config = _config(runtime_paths)
+    event_loop_thread_id = threading.get_ident()
+    scan_thread_ids: list[int] = []
+
+    def target_loader(_config: Config, _runtime_paths: RuntimePaths) -> list[WorkspaceAutomationTarget]:
+        scan_thread_ids.append(threading.get_ident())
+        return [_target(tmp_path)]
+
+    service = WorkspaceAutomationService(
+        target_loader=target_loader,
+        automation_loader=lambda **_kwargs: WorkspaceAutomationLoadResult(),
+        scan_interval_seconds=None,
+    )
+
+    await service.start(config, runtime_paths, HookRegistry.empty(), _bot_provider, object())
+
+    assert scan_thread_ids
+    assert all(thread_id != event_loop_thread_id for thread_id in scan_thread_ids)
 
     await service.shutdown()
 
@@ -592,11 +626,27 @@ async def test_refresh_cancels_loaded_automation_when_file_is_deleted(
 
     await service.start(config, runtime_paths, HookRegistry.empty(), _bot_provider, object())
     await clock.wait_for_sleep_count(1)
+    key = AutomationKey.from_loaded(automation)
+    await service._record_status(
+        key,
+        _RunStatus(
+            agent_name="ops",
+            automation_id="urgent_email_poll",
+            workspace_root=str(tmp_path),
+            last_status="action_succeeded",
+            last_run_at="2026-01-01T00:00:00+00:00",
+            last_exit_code=42,
+            last_event_id="$sent",
+        ),
+    )
+    state_path = runtime_paths.storage_root / "workspace_automations" / "state.json"
+    assert json.loads(state_path.read_text(encoding="utf-8"))["automations"]
 
     await service.refresh(config, HookRegistry.empty(), _bot_provider, object())
 
     assert service.list_loaded() == ()
     assert task_recorder.tasks[0].done()
+    assert json.loads(state_path.read_text(encoding="utf-8")) == {"automations": {}}
 
     await service.shutdown()
 

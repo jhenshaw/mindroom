@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     icon="Workflow",
     icon_color="text-indigo-500",
     dependencies=["agno"],
-    docs_url="https://github.com/mindroom-ai/mindroom",
+    docs_url="https://docs.mindroom.chat/workspace-automations/",
     function_names=(
         "list_automations",
         "reload_automations",

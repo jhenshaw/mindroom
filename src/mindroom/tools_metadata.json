@@ -8483,7 +8483,7 @@
       ],
       "description": "Validate, list, and reload workspace-authored automations",
       "display_name": "Workspace Automation",
-      "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "docs_url": "https://docs.mindroom.chat/workspace-automations/",
       "function_names": [
         "list_automations",
         "reload_automations",

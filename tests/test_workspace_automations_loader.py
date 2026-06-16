@@ -269,6 +269,33 @@ automations:
     assert "cannot produce" in result.errors[0].message
 
 
+def test_leap_year_schedule_gap_below_policy_limit_returns_structured_error(tmp_path: Path) -> None:
+    """Cron interval validation should see Feb 28/29 leap-year adjacent runs."""
+    _write_automations(
+        tmp_path,
+        """
+version: 1
+automations:
+  leap_year_gap:
+    schedule: "0 0 28,29 2 *"
+    check:
+      type: shell
+      command: "true"
+      timeout_seconds: 1
+    action:
+      type: none
+""",
+    )
+
+    result = _load(tmp_path, policy=_policy(min_interval_seconds=172800))
+
+    assert result.automations == ()
+    assert len(result.errors) == 1
+    assert result.errors[0].automation_id == "leap_year_gap"
+    assert result.errors[0].field_path == ("automations", "leap_year_gap", "schedule")
+    assert "min_interval_seconds 172800" in result.errors[0].message
+
+
 def test_timeout_above_policy_limit_returns_structured_error(tmp_path: Path) -> None:
     """Check timeout should not exceed the effective policy cap."""
     _write_automations(
@@ -529,6 +556,62 @@ automations:
 
     assert result.errors == ()
     assert result.automations[0].action.room == "Ops"
+
+
+def test_single_agent_room_is_used_when_hook_action_omits_room(tmp_path: Path) -> None:
+    """Hook actions may inherit the sole configured agent room for room-scoped hooks."""
+    _write_automations(
+        tmp_path,
+        """
+version: 1
+automations:
+  fallback_hook_room:
+    schedule: "*/1 * * * *"
+    check:
+      type: shell
+      command: "true"
+      timeout_seconds: 1
+    trigger:
+      exit_code: 0
+    action:
+      type: hook
+""",
+    )
+
+    result = _load(tmp_path, rooms=["Ops"])
+
+    assert result.errors == ()
+    assert result.automations[0].action.room == "Ops"
+
+
+def test_hook_action_room_must_belong_to_owning_agent(tmp_path: Path) -> None:
+    """Hook action room scopes should not spoof unrelated configured rooms."""
+    _write_automations(
+        tmp_path,
+        """
+version: 1
+automations:
+  foreign_hook_room:
+    schedule: "*/1 * * * *"
+    check:
+      type: shell
+      command: "true"
+      timeout_seconds: 1
+    trigger:
+      exit_code: 0
+    action:
+      type: hook
+      room: "Security"
+""",
+    )
+
+    result = _load(tmp_path, rooms=["Ops"])
+
+    assert result.automations == ()
+    assert len(result.errors) == 1
+    assert result.errors[0].automation_id == "foreign_hook_room"
+    assert result.errors[0].field_path == ("automations", "foreign_hook_room", "action", "room")
+    assert "owning agent" in result.errors[0].message
 
 
 def test_single_agent_room_fallback_uses_shared_target_helper(

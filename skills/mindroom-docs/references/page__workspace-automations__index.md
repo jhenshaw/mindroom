@@ -87,14 +87,16 @@ Each automation id must be a single path-safe identifier.
 `trigger` supports `exit_code`, `stdout_matches`, `stderr_matches`, `stdout_not_matches`, and `stderr_not_matches`.
 Every action except `none` requires a trigger with at least one predicate.
 `action.room` is required for `matrix_message` and `agent_message` unless the owning agent has exactly one configured room.
+When `action.room` is present or inferred, it must be one of the owning agent's configured `rooms`.
 `action.message` is required for `matrix_message` and `agent_message`.
 
 ## Actions
 
 `none` records whether the check matched and performs no visible action.
 `hook` emits `automation:triggered` with the automation metadata, check result, trigger payload, and action payload.
+For `hook`, `action.room` is optional, but room-scoped hooks only match when the configured or inferred room resolves to a Matrix room ID.
 `matrix_message` sends the configured message to Matrix without asking an agent to respond.
-`agent_message` sends the configured Matrix message with dispatch enabled, which is the action path that can start an LLM response.
+`agent_message` sends the configured Matrix message with dispatch enabled and an internal mention for the owning agent, which is the action path that can start an LLM response.
 
 Every non-`none` action requires explicit policy opt-in through `allowed_actions`.
 Deterministic shell checks do not start an LLM by themselves.

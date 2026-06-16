@@ -272,6 +272,7 @@ class _MultiAgentOrchestrator:
             ),
             sync_runtime_support=lambda config: self._sync_runtime_support_services(config, start_watcher=True),
             mark_runtime_support_ready=lambda: self._approval_transport.mark_startup_runtime_support_ready(),
+            after_rooms_and_memberships=lambda config: self._start_workspace_automation_service(config),
         )
 
     @property
@@ -1114,13 +1115,6 @@ class _MultiAgentOrchestrator:
         log_startup_phase_finished("bind_runtime_support", phase_started)
 
         self.running = True
-
-        phase_started = log_startup_phase_started("start_workspace_automations")
-        try:
-            await self._start_workspace_automation_service(config)
-        except Exception:
-            logger.exception("Workspace automation startup failed; continuing without automations")
-        log_startup_phase_finished("start_workspace_automations", phase_started)
 
         # Create sync tasks for each bot with automatic restart on failure.
         set_runtime_starting("Starting Matrix sync loops")

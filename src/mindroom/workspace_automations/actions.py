@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any
 
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import (
     EVENT_AUTOMATION_TRIGGERED,
     AutomationTriggeredContext,
@@ -85,6 +86,7 @@ async def run_automation_action(
         )
     elif action_type in _VISIBLE_ACTION_TYPES:
         result = await _run_visible_action(
+            config=config,
             runtime_paths=runtime_paths,
             target=target,
             automation=automation,
@@ -106,10 +108,15 @@ async def _run_hook_action(
     message_sender: HookMessageSender | None,
     hook_registry: HookRegistry | None,
 ) -> WorkspaceAutomationActionResult:
-    room_id = resolve_action_room(
+    room = resolve_action_room(
         action_room=automation.action.room,
         agent_configured_rooms=target.agent_configured_rooms,
     )
+    room_id = None
+    if room is not None:
+        room_id = _resolve_matrix_room_id(room, runtime_paths)
+        if room_id is None:
+            return _failure(automation, f"action.room '{room}' did not resolve to a Matrix room id")
     context = _automation_context(
         config=config,
         runtime_paths=runtime_paths,
@@ -125,6 +132,7 @@ async def _run_hook_action(
 
 async def _run_visible_action(
     *,
+    config: Config,
     runtime_paths: RuntimePaths,
     target: WorkspaceAutomationTarget,
     automation: LoadedWorkspaceAutomation,
@@ -145,7 +153,11 @@ async def _run_visible_action(
             prepared.message,
             prepared.thread_id,
             format_hook_source(_HOOK_SOURCE_PLUGIN_NAME, EVENT_AUTOMATION_TRIGGERED),
-            None,
+            _extra_content_for_visible_action(
+                config=config,
+                runtime_paths=runtime_paths,
+                automation=automation,
+            ),
             trigger_dispatch=automation.action.type == "agent_message",
         )
     except Exception as exc:
@@ -189,6 +201,18 @@ def _resolve_matrix_room_id(room: str, runtime_paths: RuntimePaths) -> str | Non
     if resolved_room.startswith("!"):
         return resolved_room
     return None
+
+
+def _extra_content_for_visible_action(
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    automation: LoadedWorkspaceAutomation,
+) -> dict[str, Any] | None:
+    if automation.action.type != "agent_message":
+        return None
+    owner_user_id = entity_identity_registry(config, runtime_paths).current_id(automation.agent_name).full_id
+    return {"m.mentions": {"user_ids": [owner_user_id]}}
 
 
 def _automation_context(

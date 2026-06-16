@@ -132,6 +132,13 @@ def _add_room(runtime_paths: RuntimePaths, room_key: str, room_id: str = "!lobby
     matrix_state.save(runtime_paths)
 
 
+def _add_agent_accounts(runtime_paths: RuntimePaths) -> None:
+    matrix_state = MatrixState.load(runtime_paths)
+    matrix_state.add_account("agent_router", "mindroom_router", "test-password", domain="localhost")
+    matrix_state.add_account("agent_ops", "mindroom_ops", "test-password", domain="localhost")
+    matrix_state.save(runtime_paths)
+
+
 def _automation(
     tmp_path: Path,
     *,
@@ -248,6 +255,7 @@ async def test_agent_message_sends_visible_message_that_triggers_dispatch(
     """Agent-message actions should differ from matrix-message only by dispatch metadata."""
     sender = _FakeMessageSender()
     _add_room(runtime_paths, "Lobby")
+    _add_agent_accounts(runtime_paths)
     automation = _automation(tmp_path, action_type="agent_message")
 
     result = await run_automation_action(
@@ -265,6 +273,7 @@ async def test_agent_message_sends_visible_message_that_triggers_dispatch(
     assert sender.calls[0].room_id == "!lobby:localhost"
     assert sender.calls[0].trigger_dispatch is True
     assert sender.calls[0].source_hook == format_hook_source("workspace_automation", EVENT_AUTOMATION_TRIGGERED)
+    assert sender.calls[0].extra_content == {"m.mentions": {"user_ids": ["@mindroom_ops:localhost"]}}
 
 
 @pytest.mark.asyncio
@@ -276,12 +285,13 @@ async def test_hook_action_emits_automation_triggered_context_without_matrix_mes
     """Hook actions should emit automation context and avoid visible Matrix sends."""
     captured: list[AutomationTriggeredContext] = []
 
-    @hook(EVENT_AUTOMATION_TRIGGERED, agents=["ops"], rooms=["Lobby"])
+    @hook(EVENT_AUTOMATION_TRIGGERED, agents=["ops"], rooms=["!lobby:localhost"])
     async def on_automation(ctx: AutomationTriggeredContext) -> None:
         captured.append(ctx)
 
     registry = HookRegistry.from_plugins([_plugin("automation-test", [on_automation])])
     sender = _FakeMessageSender()
+    _add_room(runtime_paths, "Lobby")
     automation = _automation(tmp_path, action_type="hook", message=None)
 
     result = await run_automation_action(
@@ -305,7 +315,7 @@ async def test_hook_action_emits_automation_triggered_context_without_matrix_mes
     assert context.agent_name == "ops"
     assert context.automation_id == "urgent_email_poll"
     assert context.workspace_root == str(tmp_path)
-    assert context.room_id == "Lobby"
+    assert context.room_id == "!lobby:localhost"
     assert context.thread_id == "$thread"
     assert context.check_result == {
         "automation_id": "urgent_email_poll",
@@ -323,6 +333,34 @@ async def test_hook_action_emits_automation_triggered_context_without_matrix_mes
         "room": "Lobby",
         "thread_id": "$thread",
     }
+
+
+@pytest.mark.asyncio
+async def test_hook_action_refuses_unresolved_configured_room(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """Hook actions should not expose authored room names to room-scoped hooks."""
+    captured: list[AutomationTriggeredContext] = []
+
+    @hook(EVENT_AUTOMATION_TRIGGERED, agents=["ops"], rooms=["!lobby:localhost"])
+    async def on_automation(ctx: AutomationTriggeredContext) -> None:
+        captured.append(ctx)
+
+    result = await run_automation_action(
+        config=config,
+        runtime_paths=runtime_paths,
+        target=cast("WorkspaceAutomationTarget", _target(tmp_path, policy=_policy("hook"))),
+        automation=_automation(tmp_path, action_type="hook", message=None),
+        check_result=_check_result(),
+        hook_registry=HookRegistry.from_plugins([_plugin("automation-test", [on_automation])]),
+        message_sender=_FakeMessageSender(),
+    )
+
+    assert result.ok is False
+    assert result.failure_reason == "action.room 'Lobby' did not resolve to a Matrix room id"
+    assert captured == []
 
 
 @pytest.mark.asyncio

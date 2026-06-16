@@ -29,8 +29,9 @@ if TYPE_CHECKING:
 
 AUTOMATIONS_RELATIVE_PATH = Path(".mindroom") / "automations.yaml"
 _SCHEDULE_INTERVAL_BASE = datetime(2026, 1, 1, tzinfo=UTC)
-# Span beyond a full yearly cron period so every distinct gap is observed.
-_SCHEDULE_SAMPLE_SPAN_SECONDS = 370 * 24 * 60 * 60
+# Five-field cron has no year column, but month/day gaps repeat on the Gregorian
+# 400-year leap cycle. Dense schedules hit the max-run cap after seeing short gaps.
+_SCHEDULE_SAMPLE_SPAN_SECONDS = 401 * 366 * 24 * 60 * 60
 # Safety cap so dense schedules (e.g. every minute) cannot iterate unboundedly.
 _SCHEDULE_SAMPLE_MAX_RUNS = 10_000
 
@@ -174,7 +175,7 @@ def _normalize_action_room(
     action: WorkspaceAutomationAction,
     agent_rooms: Sequence[str],
 ) -> WorkspaceAutomationAction:
-    if action.type not in {"agent_message", "matrix_message"}:
+    if action.type not in {"agent_message", "matrix_message", "hook"}:
         return action
     room = resolve_action_room(action_room=action.room, agent_configured_rooms=agent_rooms)
     if room == action.room:
@@ -238,7 +239,7 @@ def _policy_errors(
                 file_path=file_path,
                 automation_id=automation_id,
                 field_path=("automations", automation_id, "trigger"),
-                message="trigger must be present for visible workspace automation actions",
+                message="trigger must be present for non-none workspace automation actions",
             ),
         )
     elif not workspace_automation_trigger_has_rule(definition.trigger):
@@ -252,38 +253,36 @@ def _policy_errors(
         )
 
     errors.extend(
-        _visible_action_errors(
+        _action_room_errors(
             file_path=file_path,
             automation_id=automation_id,
             action=action,
             agent_rooms=agent_rooms,
         ),
     )
+    errors.extend(
+        _visible_action_errors(
+            file_path=file_path,
+            automation_id=automation_id,
+            action=action,
+        ),
+    )
 
     return errors
 
 
-def _visible_action_errors(
+def _action_room_errors(
     *,
     file_path: Path,
     automation_id: str,
     action: WorkspaceAutomationAction,
     agent_rooms: Sequence[str],
 ) -> list[WorkspaceAutomationLoadError]:
-    if action.type not in {"agent_message", "matrix_message"}:
+    if action.type not in {"agent_message", "matrix_message", "hook"}:
         return []
 
     errors: list[WorkspaceAutomationLoadError] = []
-    if action.message is None:
-        errors.append(
-            WorkspaceAutomationLoadError(
-                file_path=file_path,
-                automation_id=automation_id,
-                field_path=("automations", automation_id, "action", "message"),
-                message="action.message is required for visible workspace automation actions",
-            ),
-        )
-    if action.room is None:
+    if action.room is None and action.type in {"agent_message", "matrix_message"}:
         errors.append(
             WorkspaceAutomationLoadError(
                 file_path=file_path,
@@ -304,13 +303,33 @@ def _visible_action_errors(
     return errors
 
 
+def _visible_action_errors(
+    *,
+    file_path: Path,
+    automation_id: str,
+    action: WorkspaceAutomationAction,
+) -> list[WorkspaceAutomationLoadError]:
+    if action.type not in {"agent_message", "matrix_message"}:
+        return []
+    if action.message is not None:
+        return []
+    return [
+        WorkspaceAutomationLoadError(
+            file_path=file_path,
+            automation_id=automation_id,
+            field_path=("automations", automation_id, "action", "message"),
+            message="action.message is required for visible workspace automation actions",
+        ),
+    ]
+
+
 def _minimum_schedule_interval_seconds(schedule: str) -> float:
     """Return the smallest gap between consecutive runs across a full schedule period.
 
     Sampling only the first gap is unsafe: irregular schedules (e.g. ``0 0 1,2 * *``)
-    can have a large first gap but a much smaller minimum gap elsewhere. Sample
-    consecutive runs until they span beyond a yearly cron period (5-field cron has no
-    year component, so a year covers every distinct gap) and return the minimum gap.
+    can have a large first gap but a much smaller minimum gap elsewhere. Sample until
+    sparse schedules span the Gregorian leap cycle; dense schedules hit the max-run cap
+    only after many repeated short gaps have already been observed.
     """
     iterator = croniter(schedule, _SCHEDULE_INTERVAL_BASE)
     previous_run = iterator.get_next(datetime)
