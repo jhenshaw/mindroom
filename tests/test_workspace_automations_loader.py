@@ -356,6 +356,49 @@ automations:
     assert "trigger" in result.errors[0].message
 
 
+def test_visible_actions_without_message_return_structured_errors(tmp_path: Path) -> None:
+    """Visible Matrix actions should require an explicit message at load time."""
+    _write_automations(
+        tmp_path,
+        """
+version: 1
+automations:
+  missing_matrix_message:
+    schedule: "*/1 * * * *"
+    check:
+      type: shell
+      command: "true"
+      timeout_seconds: 1
+    trigger:
+      exit_code: 0
+    action:
+      type: matrix_message
+      room: "Lobby"
+  missing_agent_message:
+    schedule: "*/1 * * * *"
+    check:
+      type: shell
+      command: "true"
+      timeout_seconds: 1
+    trigger:
+      exit_code: 0
+    action:
+      type: agent_message
+      room: "Lobby"
+""",
+    )
+
+    result = _load(tmp_path)
+
+    assert result.automations == ()
+    assert len(result.errors) == 2
+    assert {error.field_path for error in result.errors} == {
+        ("automations", "missing_matrix_message", "action", "message"),
+        ("automations", "missing_agent_message", "action", "message"),
+    }
+    assert all("action.message" in error.message for error in result.errors)
+
+
 def test_action_none_does_not_require_trigger_or_policy_action(tmp_path: Path) -> None:
     """The none action should be allowed without a trigger and without policy opt-in."""
     _write_automations(

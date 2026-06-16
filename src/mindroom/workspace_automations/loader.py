@@ -251,26 +251,56 @@ def _policy_errors(
             ),
         )
 
-    if action.type in {"agent_message", "matrix_message"}:
-        if action.room is None:
-            errors.append(
-                WorkspaceAutomationLoadError(
-                    file_path=file_path,
-                    automation_id=automation_id,
-                    field_path=("automations", automation_id, "action", "room"),
-                    message="action.room is required unless the owning agent has exactly one configured room",
-                ),
-            )
-        elif action.room not in agent_rooms:
-            errors.append(
-                WorkspaceAutomationLoadError(
-                    file_path=file_path,
-                    automation_id=automation_id,
-                    field_path=("automations", automation_id, "action", "room"),
-                    message="action.room must be one of the owning agent's configured rooms",
-                ),
-            )
+    errors.extend(
+        _visible_action_errors(
+            file_path=file_path,
+            automation_id=automation_id,
+            action=action,
+            agent_rooms=agent_rooms,
+        ),
+    )
 
+    return errors
+
+
+def _visible_action_errors(
+    *,
+    file_path: Path,
+    automation_id: str,
+    action: WorkspaceAutomationAction,
+    agent_rooms: Sequence[str],
+) -> list[WorkspaceAutomationLoadError]:
+    if action.type not in {"agent_message", "matrix_message"}:
+        return []
+
+    errors: list[WorkspaceAutomationLoadError] = []
+    if action.message is None:
+        errors.append(
+            WorkspaceAutomationLoadError(
+                file_path=file_path,
+                automation_id=automation_id,
+                field_path=("automations", automation_id, "action", "message"),
+                message="action.message is required for visible workspace automation actions",
+            ),
+        )
+    if action.room is None:
+        errors.append(
+            WorkspaceAutomationLoadError(
+                file_path=file_path,
+                automation_id=automation_id,
+                field_path=("automations", automation_id, "action", "room"),
+                message="action.room is required unless the owning agent has exactly one configured room",
+            ),
+        )
+    elif action.room not in agent_rooms:
+        errors.append(
+            WorkspaceAutomationLoadError(
+                file_path=file_path,
+                automation_id=automation_id,
+                field_path=("automations", automation_id, "action", "room"),
+                message="action.room must be one of the owning agent's configured rooms",
+            ),
+        )
     return errors
 
 
