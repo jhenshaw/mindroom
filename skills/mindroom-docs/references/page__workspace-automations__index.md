@@ -1,14 +1,10 @@
----
-icon: lucide/workflow
----
-
 # Workspace Automations
 
 Workspace automations are deterministic cron-like checks that live in an agent workspace.
 They are useful for cheap polling work that should not invoke an LLM every time it runs.
 A shell check can inspect files, call a local script, or query a service through the normal shell tool runtime, then only take an action when trigger predicates match.
 
-Workspace automations are separate from Matrix [`!schedule`](scheduling.md).
+Workspace automations are separate from Matrix [`!schedule`](https://docs.mindroom.chat/scheduling/).
 `!schedule` persists Matrix scheduled tasks that are interpreted by agents and LLMs.
 Workspace automations are workspace-local deterministic checks that can run without involving an LLM unless their action asks for one.
 
@@ -101,7 +97,7 @@ Every action except `none` requires a trigger with at least one predicate.
 Visible and user-facing actions require explicit policy opt-in through `allowed_actions`.
 Deterministic shell checks do not start an LLM by themselves.
 Hooks decide what happens after `automation:triggered`, so a hook can call an LLM, perform external work, send messages, or do nothing.
-See [Hooks](hooks.md) for hook configuration.
+See [Hooks](https://docs.mindroom.chat/hooks/) for hook configuration.
 
 ## Management Tool
 
@@ -120,4 +116,4 @@ This means worker backend, worker scope, workspace home, environment filtering, 
 Docker and Kubernetes dedicated workers may scale down between automation runs.
 MindRoom re-ensures or recreates the worker on the next due run before executing the shell check.
 MindRoom does not create Kubernetes CronJobs or keep-alive pods for workspace automations.
-See [Sandbox Proxy Isolation](deployment/sandbox-proxy.md#workspace-automation-shell-checks) for deployment details.
+See [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/#workspace-automation-shell-checks) for deployment details.
