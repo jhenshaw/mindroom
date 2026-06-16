@@ -11,6 +11,11 @@ from mindroom.workspace_automations.models import (
     WorkspaceAutomationLoadResult,
     WorkspaceAutomationTrigger,
 )
+from mindroom.workspace_automations.targets import (
+    WorkspaceAutomationTarget,
+    iter_workspace_automation_targets,
+    resolve_action_room,
+)
 
 __all__ = [
     "AUTOMATIONS_RELATIVE_PATH",
@@ -21,6 +26,9 @@ __all__ = [
     "WorkspaceAutomationFile",
     "WorkspaceAutomationLoadError",
     "WorkspaceAutomationLoadResult",
+    "WorkspaceAutomationTarget",
     "WorkspaceAutomationTrigger",
+    "iter_workspace_automation_targets",
     "load_workspace_automations",
+    "resolve_action_room",
 ]
