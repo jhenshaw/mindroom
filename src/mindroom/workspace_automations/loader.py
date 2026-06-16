@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import yaml
-from croniter import CroniterBadCronError, CroniterBadDateError, croniter
+from croniter import croniter
 from pydantic import ValidationError
 
 from mindroom.workspace_automations.models import (
@@ -29,6 +29,10 @@ if TYPE_CHECKING:
 
 AUTOMATIONS_RELATIVE_PATH = Path(".mindroom") / "automations.yaml"
 _SCHEDULE_INTERVAL_BASE = datetime(2026, 1, 1, tzinfo=UTC)
+# Span beyond a full yearly cron period so every distinct gap is observed.
+_SCHEDULE_SAMPLE_SPAN_SECONDS = 370 * 24 * 60 * 60
+# Safety cap so dense schedules (e.g. every minute) cannot iterate unboundedly.
+_SCHEDULE_SAMPLE_MAX_RUNS = 10_000
 
 
 def load_workspace_automations(
@@ -78,6 +82,7 @@ def load_workspace_automations(
             automation_id=automation_id,
             definition=definition,
             action=normalized_action,
+            agent_rooms=agent_rooms,
             policy=policy,
         )
         if policy_errors:
@@ -183,6 +188,7 @@ def _policy_errors(
     automation_id: str,
     definition: WorkspaceAutomationDefinition,
     action: WorkspaceAutomationAction,
+    agent_rooms: Sequence[str],
     policy: WorkspaceAutomationPolicyConfig,
 ) -> list[WorkspaceAutomationLoadError]:
     errors: list[WorkspaceAutomationLoadError] = []
@@ -197,18 +203,9 @@ def _policy_errors(
             ),
         )
 
-    try:
-        interval_seconds = _minimum_schedule_interval_seconds(definition.schedule)
-    except (CroniterBadCronError, CroniterBadDateError) as exc:
-        errors.append(
-            WorkspaceAutomationLoadError(
-                file_path=file_path,
-                automation_id=automation_id,
-                field_path=("automations", automation_id, "schedule"),
-                message=f"schedule cannot produce any runs: {exc}",
-            ),
-        )
-        return errors
+    # Schedule validity is already enforced at model validation (models._validate_schedule),
+    # so the schedule is guaranteed to produce runs here.
+    interval_seconds = _minimum_schedule_interval_seconds(definition.schedule)
     if interval_seconds < policy.min_interval_seconds:
         errors.append(
             WorkspaceAutomationLoadError(
@@ -254,21 +251,44 @@ def _policy_errors(
             ),
         )
 
-    if action.type in {"agent_message", "matrix_message"} and action.room is None:
-        errors.append(
-            WorkspaceAutomationLoadError(
-                file_path=file_path,
-                automation_id=automation_id,
-                field_path=("automations", automation_id, "action", "room"),
-                message="action.room is required unless the owning agent has exactly one configured room",
-            ),
-        )
+    if action.type in {"agent_message", "matrix_message"}:
+        if action.room is None:
+            errors.append(
+                WorkspaceAutomationLoadError(
+                    file_path=file_path,
+                    automation_id=automation_id,
+                    field_path=("automations", automation_id, "action", "room"),
+                    message="action.room is required unless the owning agent has exactly one configured room",
+                ),
+            )
+        elif action.room not in agent_rooms:
+            errors.append(
+                WorkspaceAutomationLoadError(
+                    file_path=file_path,
+                    automation_id=automation_id,
+                    field_path=("automations", automation_id, "action", "room"),
+                    message="action.room must be one of the owning agent's configured rooms",
+                ),
+            )
 
     return errors
 
 
 def _minimum_schedule_interval_seconds(schedule: str) -> float:
+    """Return the smallest gap between consecutive runs across a full schedule period.
+
+    Sampling only the first gap is unsafe: irregular schedules (e.g. ``0 0 1,2 * *``)
+    can have a large first gap but a much smaller minimum gap elsewhere. Sample
+    consecutive runs until they span beyond a yearly cron period (5-field cron has no
+    year component, so a year covers every distinct gap) and return the minimum gap.
+    """
     iterator = croniter(schedule, _SCHEDULE_INTERVAL_BASE)
-    first_run = iterator.get_next(datetime)
-    second_run = iterator.get_next(datetime)
-    return (second_run - first_run).total_seconds()
+    previous_run = iterator.get_next(datetime)
+    minimum_seconds = float("inf")
+    for _ in range(_SCHEDULE_SAMPLE_MAX_RUNS):
+        next_run = iterator.get_next(datetime)
+        minimum_seconds = min(minimum_seconds, (next_run - previous_run).total_seconds())
+        if (next_run - _SCHEDULE_INTERVAL_BASE).total_seconds() >= _SCHEDULE_SAMPLE_SPAN_SECONDS:
+            break
+        previous_run = next_run
+    return minimum_seconds

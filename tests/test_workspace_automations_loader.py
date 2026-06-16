@@ -21,11 +21,13 @@ def _policy(
     *,
     enabled: bool = True,
     max_timeout_seconds: int = 30,
+    min_interval_seconds: int = 60,
     allowed_actions: list[str] | None = None,
 ) -> WorkspaceAutomationPolicyConfig:
     return WorkspaceAutomationPolicyConfig(
         enabled=enabled,
         max_timeout_seconds=max_timeout_seconds,
+        min_interval_seconds=min_interval_seconds,
         allowed_actions=allowed_actions if allowed_actions is not None else ["agent_message", "matrix_message", "hook"],
     )
 
@@ -517,9 +519,9 @@ automations:
 """,
     )
 
-    result = _load(tmp_path, rooms=["SharedRoom"])
+    result = _load(tmp_path, rooms=["SharedRoom", "Ops"])
 
-    assert calls == [(None, ("SharedRoom",))]
+    assert calls == [(None, ("SharedRoom", "Ops"))]
     assert result.errors == ()
     assert result.automations[0].action.room == "Ops"
 
@@ -551,6 +553,66 @@ automations:
     assert len(result.errors) == 1
     assert result.errors[0].field_path == ("automations", "ambiguous_room", "action", "room")
     assert "room" in result.errors[0].message
+
+
+def test_irregular_schedule_below_min_interval_returns_structured_error(tmp_path: Path) -> None:
+    """The minimum gap (not just the first gap) must satisfy the interval policy.
+
+    ``0 0 1,2 * *`` has a ~30-day first gap but actually fires one day apart
+    (the 1st then the 2nd), so a policy floor above one day must reject it.
+    """
+    _write_automations(
+        tmp_path,
+        """
+version: 1
+automations:
+  irregular:
+    schedule: "0 0 1,2 * *"
+    check:
+      type: shell
+      command: "true"
+      timeout_seconds: 1
+    action:
+      type: none
+""",
+    )
+
+    result = _load(tmp_path, policy=_policy(min_interval_seconds=2 * 24 * 60 * 60))
+
+    assert result.automations == ()
+    assert len(result.errors) == 1
+    assert result.errors[0].field_path == ("automations", "irregular", "schedule")
+    assert "min_interval_seconds" in result.errors[0].message
+
+
+def test_visible_action_room_outside_agent_rooms_returns_structured_error(tmp_path: Path) -> None:
+    """A workspace must not target a room outside the owning agent's configured rooms."""
+    _write_automations(
+        tmp_path,
+        """
+version: 1
+automations:
+  escalate_room:
+    schedule: "*/1 * * * *"
+    check:
+      type: shell
+      command: "true"
+      timeout_seconds: 1
+    trigger:
+      exit_code: 0
+    action:
+      type: matrix_message
+      room: "Secret"
+      message: "Done"
+""",
+    )
+
+    result = _load(tmp_path, rooms=["Lobby", "Ops"])
+
+    assert result.automations == ()
+    assert len(result.errors) == 1
+    assert result.errors[0].field_path == ("automations", "escalate_room", "action", "room")
+    assert "configured rooms" in result.errors[0].message
 
 
 def test_visible_action_without_room_errors_when_agent_has_no_rooms(tmp_path: Path) -> None:

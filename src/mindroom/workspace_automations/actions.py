@@ -39,8 +39,6 @@ class WorkspaceAutomationActionResult:
     ok: bool
     event_id: str | None = None
     failure_reason: str | None = None
-    transient: bool = False
-    hook_emitted: bool = False
 
 
 async def run_automation_action(
@@ -108,7 +106,7 @@ async def _run_hook_action(
         message_sender=message_sender,
     )
     await emit(hook_registry or HookRegistry.empty(), EVENT_AUTOMATION_TRIGGERED, context)
-    return _success(automation, hook_emitted=True)
+    return _success(automation)
 
 
 async def _run_visible_action(
@@ -133,7 +131,7 @@ async def _run_visible_action(
             "action.message is required for visible workspace automation actions",
         )
     if message_sender is None:
-        return _failure(automation, "hook message sender is not available", transient=True)
+        return _failure(automation, "hook message sender is not available")
 
     try:
         event_id = await message_sender(
@@ -145,9 +143,9 @@ async def _run_visible_action(
             trigger_dispatch=action.type == "agent_message",
         )
     except Exception as exc:
-        return _failure(automation, f"{type(exc).__name__}: {exc}", transient=True)
+        return _failure(automation, f"{type(exc).__name__}: {exc}")
     if event_id is None:
-        return _failure(automation, "hook message sender did not return an event id", transient=True)
+        return _failure(automation, "hook message sender did not return an event id")
     return _success(automation, event_id=event_id)
 
 
@@ -200,29 +198,24 @@ def _success(
     automation: LoadedWorkspaceAutomation,
     *,
     event_id: str | None = None,
-    hook_emitted: bool = False,
 ) -> WorkspaceAutomationActionResult:
     return WorkspaceAutomationActionResult(
         automation_id=automation.automation_id,
         action_type=automation.action.type,
         ok=True,
         event_id=event_id,
-        hook_emitted=hook_emitted,
     )
 
 
 def _failure(
     automation: LoadedWorkspaceAutomation,
     reason: str,
-    *,
-    transient: bool = False,
 ) -> WorkspaceAutomationActionResult:
     return WorkspaceAutomationActionResult(
         automation_id=automation.automation_id,
         action_type=automation.action.type,
         ok=False,
         failure_reason=reason,
-        transient=transient,
     )
 
 

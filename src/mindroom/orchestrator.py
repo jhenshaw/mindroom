@@ -319,7 +319,7 @@ class _MultiAgentOrchestrator:
         router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
         if router_bot is None:
             return None
-        return router_bot._conversation_cache
+        return router_bot.conversation_cache
 
     async def _start_workspace_automation_service(self, config: Config) -> None:
         """Start workspace automation supervision once router runtime support is ready."""
@@ -789,7 +789,10 @@ class _MultiAgentOrchestrator:
                     self.runtime_paths,
                 )
                 self._activate_hook_registry(recovery_result.hook_registry)
-                await self._refresh_workspace_automation_service(config)
+                try:
+                    await self._refresh_workspace_automation_service(config)
+                except Exception:
+                    logger.exception("Workspace automation refresh failed during plugin-reload recovery")
                 clear_worker_validation_snapshot_cache()
                 self.plugin_watch.refresh(config)
                 logger.warning(warning_message, source=source, **warning_kwargs)
@@ -1021,7 +1024,7 @@ class _MultiAgentOrchestrator:
                     bot_user_ids=bot_user_ids,
                     config=config,
                     runtime_paths=self.runtime_paths,
-                    conversation_cache=bot._conversation_cache,
+                    conversation_cache=bot.conversation_cache,
                     startup_cutoff_ms=startup_cutoff_ms,
                 )
                 cleaned_count += bot_cleaned_count
@@ -1056,7 +1059,7 @@ class _MultiAgentOrchestrator:
                 interrupted_threads,
                 config=config,
                 runtime_paths=self.runtime_paths,
-                conversation_cache=router_bot._conversation_cache,
+                conversation_cache=router_bot.conversation_cache,
             )
             if resumed_count > 0:
                 logger.info("Queued auto-resume messages after restart", count=resumed_count)
@@ -1113,7 +1116,10 @@ class _MultiAgentOrchestrator:
         self.running = True
 
         phase_started = log_startup_phase_started("start_workspace_automations")
-        await self._start_workspace_automation_service(config)
+        try:
+            await self._start_workspace_automation_service(config)
+        except Exception:
+            logger.exception("Workspace automation startup failed; continuing without automations")
         log_startup_phase_finished("start_workspace_automations", phase_started)
 
         # Create sync tasks for each bot with automatic restart on failure.

@@ -193,7 +193,6 @@ async def test_none_action_succeeds_without_visible_effects(
     assert result.action_type == "none"
     assert result.event_id is None
     assert result.failure_reason is None
-    assert result.transient is False
     assert sender.calls == []
 
 
@@ -288,7 +287,6 @@ async def test_hook_action_emits_automation_triggered_context_without_matrix_mes
     assert result.ok is True
     assert result.action_type == "hook"
     assert result.event_id is None
-    assert result.hook_emitted is True
     assert sender.calls == []
 
     assert len(captured) == 1
@@ -337,7 +335,6 @@ async def test_action_execution_rechecks_policy_before_visible_effects(
     )
 
     assert result.ok is False
-    assert result.transient is False
     assert result.failure_reason == "action.type 'agent_message' is not allowed by workspace automation policy"
     assert sender.calls == []
 
@@ -367,7 +364,6 @@ async def test_visible_action_room_resolution_failure_returns_non_transient_fail
     )
 
     assert result.ok is False
-    assert result.transient is False
     assert result.failure_reason == "action.room is required unless the owning agent has exactly one configured room"
     assert sender.calls == []
 
@@ -390,7 +386,6 @@ async def test_visible_action_without_message_sender_returns_transient_failure(
     )
 
     assert result.ok is False
-    assert result.transient is True
     assert result.failure_reason == "hook message sender is not available"
 
 
@@ -414,6 +409,5 @@ async def test_visible_action_without_message_text_returns_non_transient_failure
     )
 
     assert result.ok is False
-    assert result.transient is False
     assert result.failure_reason == "action.message is required for visible workspace automation actions"
     assert sender.calls == []
