@@ -285,6 +285,14 @@ class WorkspaceAutomationService:
             await self._cancel_task(key)
             self._run_status.pop(key, None)
 
+        changed_schedule_keys = {
+            key
+            for key in set(self._loaded) & set(loaded_entries)
+            if self._loaded[key].automation.schedule != loaded_entries[key].automation.schedule
+        }
+        for key in sorted(changed_schedule_keys, key=AutomationKey.state_id):
+            await self._cancel_task(key)
+
         self._loaded = dict(loaded_entries)
 
         for key in sorted(self._loaded, key=AutomationKey.state_id):

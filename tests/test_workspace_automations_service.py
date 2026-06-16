@@ -436,6 +436,50 @@ async def test_refresh_replaces_config_without_duplicate_tasks(
 
 
 @pytest.mark.asyncio
+async def test_refresh_restarts_same_key_when_automation_definition_changes(
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """A changed same-key automation should not keep sleeping on the old schedule."""
+    config = _config(runtime_paths)
+    old_automation = _automation(tmp_path, schedule="0 9 * * *")
+    new_automation = _automation(tmp_path, schedule="* * * * *")
+    clock = _ControlledClock(datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC))
+    task_recorder = _TaskRecorder()
+    loader_results = [
+        WorkspaceAutomationLoadResult(automations=(old_automation,)),
+        WorkspaceAutomationLoadResult(automations=(new_automation,)),
+    ]
+
+    def automation_loader(**_kwargs: object) -> WorkspaceAutomationLoadResult:
+        return loader_results.pop(0)
+
+    service = WorkspaceAutomationService(
+        target_loader=lambda _config, _runtime_paths: [_target(tmp_path)],
+        automation_loader=automation_loader,
+        now=clock.current_time,
+        sleep=clock.sleep,
+        task_factory=task_recorder,
+        scan_interval_seconds=None,
+        max_sleep_seconds=12 * 60 * 60,
+    )
+
+    await service.start(config, runtime_paths, HookRegistry.empty(), _bot_provider, object())
+    await clock.wait_for_sleep_count(1)
+    assert clock.requests[0].delay == 9 * 60 * 60
+
+    await service.refresh(config, HookRegistry.empty(), _bot_provider, object())
+    await clock.wait_for_sleep_count(2)
+
+    assert len(task_recorder.tasks) == 2
+    assert task_recorder.tasks[0].done()
+    assert not task_recorder.tasks[1].done()
+    assert clock.requests[1].delay == 60
+
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_refresh_cancels_loaded_automation_when_policy_is_disabled(
     runtime_paths: RuntimePaths,
     tmp_path: Path,

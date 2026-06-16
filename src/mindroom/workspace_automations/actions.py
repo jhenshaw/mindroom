@@ -13,6 +13,7 @@ from mindroom.hooks import (
 )
 from mindroom.hooks.types import format_hook_source
 from mindroom.logging_config import get_logger
+from mindroom.matrix.state import resolve_room_aliases
 from mindroom.workspace_automations.targets import resolve_action_room
 
 if TYPE_CHECKING:
@@ -39,6 +40,14 @@ class WorkspaceAutomationActionResult:
     ok: bool
     event_id: str | None = None
     failure_reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _VisibleActionRequest:
+    room_id: str
+    message: str
+    thread_id: str | None
+    message_sender: HookMessageSender
 
 
 async def run_automation_action(
@@ -75,7 +84,12 @@ async def run_automation_action(
             hook_registry=hook_registry,
         )
     elif action_type in _VISIBLE_ACTION_TYPES:
-        result = await _run_visible_action(target=target, automation=automation, message_sender=message_sender)
+        result = await _run_visible_action(
+            runtime_paths=runtime_paths,
+            target=target,
+            automation=automation,
+            message_sender=message_sender,
+        )
     else:
         result = _failure(automation, f"Unsupported workspace automation action type: {action_type}")
     return result
@@ -111,42 +125,70 @@ async def _run_hook_action(
 
 async def _run_visible_action(
     *,
+    runtime_paths: RuntimePaths,
     target: WorkspaceAutomationTarget,
     automation: LoadedWorkspaceAutomation,
     message_sender: HookMessageSender | None,
 ) -> WorkspaceAutomationActionResult:
-    action = automation.action
-    room_id = resolve_action_room(
-        action_room=action.room,
-        agent_configured_rooms=target.agent_configured_rooms,
+    prepared = _prepare_visible_action(
+        runtime_paths=runtime_paths,
+        target=target,
+        automation=automation,
+        message_sender=message_sender,
     )
-    if room_id is None:
-        return _failure(
-            automation,
-            "action.room is required unless the owning agent has exactly one configured room",
-        )
-    if action.message is None:
-        return _failure(
-            automation,
-            "action.message is required for visible workspace automation actions",
-        )
-    if message_sender is None:
-        return _failure(automation, "hook message sender is not available")
+    if isinstance(prepared, str):
+        return _failure(automation, prepared)
 
     try:
-        event_id = await message_sender(
-            room_id,
-            action.message,
-            action.thread_id,
+        event_id = await prepared.message_sender(
+            prepared.room_id,
+            prepared.message,
+            prepared.thread_id,
             format_hook_source(_HOOK_SOURCE_PLUGIN_NAME, EVENT_AUTOMATION_TRIGGERED),
             None,
-            trigger_dispatch=action.type == "agent_message",
+            trigger_dispatch=automation.action.type == "agent_message",
         )
     except Exception as exc:
         return _failure(automation, f"{type(exc).__name__}: {exc}")
     if event_id is None:
         return _failure(automation, "hook message sender did not return an event id")
     return _success(automation, event_id=event_id)
+
+
+def _prepare_visible_action(
+    *,
+    runtime_paths: RuntimePaths,
+    target: WorkspaceAutomationTarget,
+    automation: LoadedWorkspaceAutomation,
+    message_sender: HookMessageSender | None,
+) -> _VisibleActionRequest | str:
+    action = automation.action
+    room_id = resolve_action_room(
+        action_room=action.room,
+        agent_configured_rooms=target.agent_configured_rooms,
+    )
+    if room_id is None:
+        return "action.room is required unless the owning agent has exactly one configured room"
+    if action.message is None:
+        return "action.message is required for visible workspace automation actions"
+    if message_sender is None:
+        return "hook message sender is not available"
+    resolved_room_id = _resolve_matrix_room_id(room_id, runtime_paths)
+    if resolved_room_id is None:
+        return f"action.room '{room_id}' did not resolve to a Matrix room id"
+    return _VisibleActionRequest(
+        room_id=resolved_room_id,
+        message=action.message,
+        thread_id=action.thread_id,
+        message_sender=message_sender,
+    )
+
+
+def _resolve_matrix_room_id(room: str, runtime_paths: RuntimePaths) -> str | None:
+    resolved_room = resolve_room_aliases([room], runtime_paths)[0]
+    if resolved_room.startswith("!"):
+        return resolved_room
+    return None
 
 
 def _automation_context(

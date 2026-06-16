@@ -18,6 +18,7 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.hooks.types import format_hook_source
+from mindroom.matrix.state import MatrixState
 from mindroom.workspace_automations.actions import run_automation_action
 from mindroom.workspace_automations.executor import ShellCheckResult
 from mindroom.workspace_automations.models import (
@@ -125,6 +126,12 @@ def _target(tmp_path: Path, *, rooms: tuple[str, ...] = ("Lobby",), policy: Work
     )
 
 
+def _add_room(runtime_paths: RuntimePaths, room_key: str, room_id: str = "!lobby:localhost") -> None:
+    matrix_state = MatrixState.load(runtime_paths)
+    matrix_state.add_room(room_key, room_id, f"#{room_key.lower()}:localhost", room_key)
+    matrix_state.save(runtime_paths)
+
+
 def _automation(
     tmp_path: Path,
     *,
@@ -204,6 +211,7 @@ async def test_matrix_message_sends_visible_message_without_triggering_dispatch(
 ) -> None:
     """Matrix-message actions should use hook sender semantics without dispatch metadata."""
     sender = _FakeMessageSender()
+    _add_room(runtime_paths, "Lobby")
     automation = _automation(tmp_path, action_type="matrix_message")
 
     result = await run_automation_action(
@@ -221,7 +229,7 @@ async def test_matrix_message_sends_visible_message_without_triggering_dispatch(
     assert result.event_id == "$sent"
     assert sender.calls == [
         _SenderCall(
-            room_id="Lobby",
+            room_id="!lobby:localhost",
             body="Urgent email condition matched. Investigate and summarize.",
             thread_id="$thread",
             source_hook=format_hook_source("workspace_automation", EVENT_AUTOMATION_TRIGGERED),
@@ -239,6 +247,7 @@ async def test_agent_message_sends_visible_message_that_triggers_dispatch(
 ) -> None:
     """Agent-message actions should differ from matrix-message only by dispatch metadata."""
     sender = _FakeMessageSender()
+    _add_room(runtime_paths, "Lobby")
     automation = _automation(tmp_path, action_type="agent_message")
 
     result = await run_automation_action(
@@ -253,6 +262,7 @@ async def test_agent_message_sends_visible_message_that_triggers_dispatch(
 
     assert result.ok is True
     assert result.event_id == "$sent"
+    assert sender.calls[0].room_id == "!lobby:localhost"
     assert sender.calls[0].trigger_dispatch is True
     assert sender.calls[0].source_hook == format_hook_source("workspace_automation", EVENT_AUTOMATION_TRIGGERED)
 
@@ -365,6 +375,30 @@ async def test_visible_action_room_resolution_failure_returns_non_transient_fail
 
     assert result.ok is False
     assert result.failure_reason == "action.room is required unless the owning agent has exactly one configured room"
+    assert sender.calls == []
+
+
+@pytest.mark.asyncio
+async def test_visible_action_refuses_unresolved_configured_room(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """Visible actions should not send raw configured room names as Matrix room IDs."""
+    sender = _FakeMessageSender()
+
+    result = await run_automation_action(
+        config=config,
+        runtime_paths=runtime_paths,
+        target=cast("WorkspaceAutomationTarget", _target(tmp_path, policy=_policy("matrix_message"))),
+        automation=_automation(tmp_path, action_type="matrix_message"),
+        check_result=_check_result(),
+        hook_registry=HookRegistry.empty(),
+        message_sender=sender,
+    )
+
+    assert result.ok is False
+    assert result.failure_reason == "action.room 'Lobby' did not resolve to a Matrix room id"
     assert sender.calls == []
 
 
