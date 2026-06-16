@@ -5729,7 +5729,8 @@
       "function_names": [
         "check_shell_command",
         "kill_shell_command",
-        "run_shell_command"
+        "run_shell_command",
+        "run_shell_command_structured"
       ],
       "helper_text": null,
       "icon": "Terminal",
