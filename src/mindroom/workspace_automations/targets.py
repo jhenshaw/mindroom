@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from mindroom.runtime_resolution import resolve_agent_runtime
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
     from mindroom.config.main import Config
@@ -38,19 +39,19 @@ def iter_workspace_automation_targets(
     """Return shared agents with enabled automations and a resolved workspace."""
     targets: list[WorkspaceAutomationTarget] = []
     for agent_name, agent_config in config.agents.items():
-        if agent_config.private is not None:
-            _LOGGER.info(
-                "Skipping workspace automation target for private agent '%s': %s.",
-                agent_name,
-                _PRIVATE_AGENT_SKIP_REASON,
-            )
-            continue
-
         policy = config.get_agent_workspace_automation_policy(agent_name)
         if not policy.enabled:
             _LOGGER.debug(
                 "Skipping workspace automation target for agent '%s': workspace automations are disabled.",
                 agent_name,
+            )
+            continue
+
+        if agent_config.private is not None:
+            _LOGGER.info(
+                "Skipping workspace automation target for private agent '%s': %s.",
+                agent_name,
+                _PRIVATE_AGENT_SKIP_REASON,
             )
             continue
 
@@ -84,7 +85,7 @@ def iter_workspace_automation_targets(
 def resolve_action_room(
     *,
     action_room: str | None,
-    agent_configured_rooms: list[str],
+    agent_configured_rooms: Sequence[str],
 ) -> str | None:
     """Resolve an authored action room without Matrix alias lookups."""
     if action_room is not None:

@@ -20,6 +20,7 @@ from mindroom.workspace_automations.models import (
     WorkspaceAutomationTrigger,
     is_path_safe_automation_id,
 )
+from mindroom.workspace_automations.targets import resolve_action_room
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -78,7 +79,6 @@ def load_workspace_automations(
             definition=definition,
             action=normalized_action,
             policy=policy,
-            agent_rooms=agent_rooms,
         )
         if policy_errors:
             errors.extend(policy_errors)
@@ -169,9 +169,12 @@ def _normalize_action_room(
     action: WorkspaceAutomationAction,
     agent_rooms: Sequence[str],
 ) -> WorkspaceAutomationAction:
-    if action.type not in {"agent_message", "matrix_message"} or action.room is not None or len(agent_rooms) != 1:
+    if action.type not in {"agent_message", "matrix_message"}:
         return action
-    return action.model_copy(update={"room": agent_rooms[0]})
+    room = resolve_action_room(action_room=action.room, agent_configured_rooms=agent_rooms)
+    if room == action.room:
+        return action
+    return action.model_copy(update={"room": room})
 
 
 def _policy_errors(
@@ -181,7 +184,6 @@ def _policy_errors(
     definition: WorkspaceAutomationDefinition,
     action: WorkspaceAutomationAction,
     policy: WorkspaceAutomationPolicyConfig,
-    agent_rooms: Sequence[str],
 ) -> list[WorkspaceAutomationLoadError]:
     errors: list[WorkspaceAutomationLoadError] = []
 
@@ -252,7 +254,7 @@ def _policy_errors(
             ),
         )
 
-    if action.type in {"agent_message", "matrix_message"} and action.room is None and len(agent_rooms) != 1:
+    if action.type in {"agent_message", "matrix_message"} and action.room is None:
         errors.append(
             WorkspaceAutomationLoadError(
                 file_path=file_path,

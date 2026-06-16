@@ -5,10 +5,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.config.models import WorkspaceAutomationPolicyConfig
+from mindroom.workspace_automations import loader
 from mindroom.workspace_automations.loader import load_workspace_automations
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
+
+    import pytest
 
     from mindroom.workspace_automations.models import WorkspaceAutomationLoadResult
 
@@ -478,6 +482,44 @@ automations:
 
     result = _load(tmp_path, rooms=["Ops"])
 
+    assert result.errors == ()
+    assert result.automations[0].action.room == "Ops"
+
+
+def test_single_agent_room_fallback_uses_shared_target_helper(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Loader room fallback should use the same pure helper as action execution."""
+    calls: list[tuple[str | None, tuple[str, ...]]] = []
+
+    def resolve_action_room(action_room: str | None, agent_configured_rooms: Sequence[str]) -> str | None:
+        calls.append((action_room, tuple(agent_configured_rooms)))
+        return "Ops"
+
+    monkeypatch.setattr(loader, "resolve_action_room", resolve_action_room)
+    _write_automations(
+        tmp_path,
+        """
+version: 1
+automations:
+  fallback_room:
+    schedule: "*/1 * * * *"
+    check:
+      type: shell
+      command: "true"
+      timeout_seconds: 1
+    trigger:
+      exit_code: 0
+    action:
+      type: matrix_message
+      message: "Done"
+""",
+    )
+
+    result = _load(tmp_path, rooms=["SharedRoom"])
+
+    assert calls == [(None, ("SharedRoom",))]
     assert result.errors == ()
     assert result.automations[0].action.room == "Ops"
 

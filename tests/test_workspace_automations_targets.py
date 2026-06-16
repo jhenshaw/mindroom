@@ -179,3 +179,26 @@ def test_private_agents_are_skipped_with_a_clear_reason(
     assert result == []
     assert "Skipping workspace automation target for private agent 'mind'" in caplog.text
     assert "private workspace automations are not supported yet" in caplog.text
+
+
+def test_disabled_private_agents_do_not_log_private_unsupported_reason(
+    caplog: pytest.LogCaptureFixture,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Disabled private agents should be skipped as disabled without unsupported-private noise."""
+    config = _config(
+        runtime_paths,
+        {
+            "mind": {
+                "display_name": "Mind",
+                "private": {"per": "user"},
+                "workspace_automations": {"enabled": False},
+            },
+        },
+    )
+    caplog.set_level("INFO", logger="mindroom.workspace_automations.targets")
+
+    result = iter_workspace_automation_targets(config, runtime_paths)
+
+    assert result == []
+    assert "private workspace automations are not supported yet" not in caplog.text
