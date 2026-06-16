@@ -53,7 +53,7 @@ agents:
 `enabled` controls whether MindRoom discovers and runs workspace automation files for the policy scope.
 `min_interval_seconds` rejects cron schedules that can run more often than the configured interval.
 `max_timeout_seconds` caps `check.timeout_seconds` for one shell check.
-`max_output_bytes` caps command output returned from the check, used for trigger evaluation, and persisted in runtime state.
+`max_output_bytes` caps command output returned from the check, used for trigger evaluation, and included in action or hook payloads.
 `allowed_actions` lists visible or side-effecting action types that the workspace file may use.
 `none` is always allowed and is not listed in `allowed_actions`.
 
@@ -90,6 +90,7 @@ Each automation id must be a single path-safe identifier.
 `trigger` supports `exit_code`, `stdout_matches`, `stderr_matches`, `stdout_not_matches`, and `stderr_not_matches`.
 Every action except `none` requires a trigger with at least one predicate.
 `action.room` is required for `matrix_message` and `agent_message` unless the owning agent has exactly one configured room.
+`action.message` is required for `matrix_message` and `agent_message`.
 
 ## Actions
 
@@ -98,7 +99,7 @@ Every action except `none` requires a trigger with at least one predicate.
 `matrix_message` sends the configured message to Matrix without asking an agent to respond.
 `agent_message` sends the configured Matrix message with dispatch enabled, which is the action path that can start an LLM response.
 
-Visible and user-facing actions require explicit policy opt-in through `allowed_actions`.
+Every non-`none` action requires explicit policy opt-in through `allowed_actions`.
 Deterministic shell checks do not start an LLM by themselves.
 Hooks decide what happens after `automation:triggered`, so a hook can call an LLM, perform external work, send messages, or do nothing.
 See [Hooks](hooks.md) for hook configuration.
