@@ -49,6 +49,7 @@ from mindroom.config.models import (
     ModelConfig,
     RouterConfig,
     ToolConfigEntry,
+    WorkspaceAutomationActionName,
     WorkspaceAutomationPolicyConfig,
 )
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
@@ -1000,6 +1001,8 @@ class Config(BaseModel):
         config = cls.model_validate(approved_egress_overlay.data, context={"runtime_paths": runtime_paths})
         config._runtime_approved_egress_injected_default_tool = approved_egress_overlay.injected_default_tool
         config._runtime_approved_egress_injected_approval_rule = approved_egress_overlay.injected_approval_rule
+        for agent_name in config.agents:
+            config.get_agent_workspace_automation_policy(agent_name)
         # why-lazy: module-top catalog import pulls runtime tool registry paths and loads agents+tools at config import.
         from mindroom.tool_system.catalog import ToolConfigOverrideError, ToolMetadataValidationError  # noqa: PLC0415
 
@@ -1168,12 +1171,13 @@ class Config(BaseModel):
     ) -> WorkspaceAutomationPolicyConfig:
         """Return the effective workspace-authored automation policy for one agent."""
         agent_config = self.get_agent(agent_name)
+        default_allowed_actions: list[WorkspaceAutomationActionName] = []
         merged = {
             "enabled": False,
             "min_interval_seconds": 60,
             "max_timeout_seconds": 30,
             "max_output_bytes": 65536,
-            "allowed_actions": [],
+            "allowed_actions": default_allowed_actions,
         }
         merged.update(self.defaults.workspace_automations.model_dump(exclude_none=True))
         if agent_config.workspace_automations is not None:
@@ -1861,9 +1865,6 @@ class Config(BaseModel):
             resolved_context_window = self.get_model_context_window(resolved_model_name)
 
         return ResolvedRuntimeModel(model_name=resolved_model_name, context_window=resolved_context_window)
-
-
-_CONFIG_PUBLIC_API_REFERENCES = (Config.get_agent_workspace_automation_policy,)
 
 
 def load_config(

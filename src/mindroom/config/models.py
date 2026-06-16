@@ -28,7 +28,7 @@ class EffectiveToolConfig:
 
 
 AgentLearningMode = Literal["always", "agentic"]
-_WorkspaceAutomationActionName = Literal["agent_message", "matrix_message", "hook"]
+WorkspaceAutomationActionName = Literal["agent_message", "matrix_message", "hook"]
 _DEFAULT_DEFAULT_TOOLS = ("scheduler",)
 _TOOL_CONFIG_CONTROL_KEYS = frozenset({"defer", "initial"})
 
@@ -74,8 +74,8 @@ class CoalescingConfig(BaseModel):
 
 
 def _validate_unique_workspace_automation_actions(
-    actions: list[_WorkspaceAutomationActionName] | None,
-) -> list[_WorkspaceAutomationActionName] | None:
+    actions: list[WorkspaceAutomationActionName] | None,
+) -> list[WorkspaceAutomationActionName] | None:
     """Ensure each visible automation action appears at most once."""
     if actions is None:
         return None
@@ -87,7 +87,7 @@ def _validate_unique_workspace_automation_actions(
 
 
 _WorkspaceAutomationAllowedActions = Annotated[
-    list[_WorkspaceAutomationActionName] | None,
+    list[WorkspaceAutomationActionName] | None,
     AfterValidator(_validate_unique_workspace_automation_actions),
 ]
 
@@ -118,7 +118,7 @@ class WorkspaceAutomationPolicyConfig(BaseModel):
     )
     allowed_actions: _WorkspaceAutomationAllowedActions = Field(
         default=None,
-        description="Visible workspace-authored automation actions allowed for this scope; none is always allowed",
+        description="Visible workspace-authored automation actions allowed for this policy scope",
     )
 
 

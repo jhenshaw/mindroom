@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, get_args
 
 import pytest
 from pydantic import ValidationError
 
 from mindroom.config.main import Config
+from mindroom.config.models import WorkspaceAutomationActionName
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 
 if TYPE_CHECKING:
@@ -25,6 +26,11 @@ def runtime_paths(tmp_path: Path) -> RuntimePaths:
             "MINDROOM_NAMESPACE": "",
         },
     )
+
+
+def test_workspace_automation_action_type_is_public() -> None:
+    """Workspace automation action names should be importable from config models."""
+    assert get_args(WorkspaceAutomationActionName) == ("agent_message", "matrix_message", "hook")
 
 
 def test_workspace_automation_policy_defaults_disabled(runtime_paths: RuntimePaths) -> None:
