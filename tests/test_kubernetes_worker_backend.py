@@ -3106,6 +3106,9 @@ def test_kubernetes_backend_adds_agent_vault_mint_init_container(tmp_path: Path)
     mint_script = mint["command"][2]
     assert "agent-vault agent create" in mint_script
     assert "agent-vault agent rotate" in mint_script
+    assert "agent-vault vault agent add" in mint_script
+    assert "agent-vault vault agent set-role" in mint_script
+    assert "--role proxy > /dev/null 2>&1" not in mint_script
     assert ":proxy" in mint_script
     # The owner CLI session must not land on the shared token volume, or the
     # agent container (which mounts it) could read the owner credential.
@@ -3122,15 +3125,40 @@ def test_kubernetes_backend_adds_agent_vault_mint_init_container(tmp_path: Path)
     assert all(m["name"] != "agent-vault-bootstrap" for m in main["volumeMounts"])
     assert any(m["name"] == "agent-vault-token" and m.get("readOnly") for m in main["volumeMounts"])
     main_env = {e["name"]: e.get("value") for e in main["env"]}
+    expected_vault = worker_id_for_key(worker_key, prefix="agent-vault")
     assert main_env["MINDROOM_WORKER_EGRESS_PROXY_URL"] == "http://agent-vault:14322"
     assert main_env["MINDROOM_WORKER_EGRESS_PROXY_TOKEN_FILE"] == "/agent-vault/token"  # noqa: S105
+    assert main_env["MINDROOM_WORKER_EGRESS_PROXY_VAULT"] == expected_vault
     assert main_env["MINDROOM_WORKER_EGRESS_PROXY_CA_FILE"] == "/etc/agent-vault/ca.pem"
 
     volume_names = {v["name"] for v in template_spec["volumes"]}
     assert {"agent-vault-token", "agent-vault-bootstrap", "agent-vault-ca"} <= volume_names
 
     # No bridge/NetworkPolicy resources exist in this model.
-    assert backend._resources.agent_vault_vault_name(worker_key) == worker_id_for_key(worker_key, prefix="agent-vault")
+    assert backend._resources.agent_vault_vault_name(worker_key) == expected_vault
+
+
+def test_agent_vault_main_env_error_names_worker_key_when_vault_name_missing(tmp_path: Path) -> None:
+    """The defensive vault-name guard should include the worker key that failed."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, _apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        agent_vault=_test_agent_vault_config(),
+    )
+    worker_key = _TEST_SCOPED_WORKER_KEY_A
+
+    def _missing_vault_name(_self: object, requested_worker_key: str) -> None:
+        assert requested_worker_key == worker_key
+
+    backend._resources.agent_vault_vault_name = MethodType(_missing_vault_name, backend._resources)
+
+    with pytest.raises(WorkerBackendError) as exc_info:
+        backend._resources._agent_vault_main_env(worker_key=worker_key)
+
+    assert f"worker_key={worker_key!r}" in str(exc_info.value)
 
 
 def test_kubernetes_backend_omits_agent_vault_when_disabled(tmp_path: Path) -> None:
