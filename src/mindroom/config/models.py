@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal, Self, cast
+from typing import Annotated, Any, Literal, Self, cast
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
 from mindroom.config.validation import duplicate_items, validate_history_limit_choice
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
@@ -28,6 +28,7 @@ class EffectiveToolConfig:
 
 
 AgentLearningMode = Literal["always", "agentic"]
+_WorkspaceAutomationActionName = Literal["agent_message", "matrix_message", "hook"]
 _DEFAULT_DEFAULT_TOOLS = ("scheduler",)
 _TOOL_CONFIG_CONTROL_KEYS = frozenset({"defer", "initial"})
 
@@ -69,6 +70,55 @@ class CoalescingConfig(BaseModel):
             "Sliding window in milliseconds that a media-tailed live batch waits for more "
             "attachments or a trailing caption; batches ending in text dispatch immediately"
         ),
+    )
+
+
+def _validate_unique_workspace_automation_actions(
+    actions: list[_WorkspaceAutomationActionName] | None,
+) -> list[_WorkspaceAutomationActionName] | None:
+    """Ensure each visible automation action appears at most once."""
+    if actions is None:
+        return None
+    duplicates = duplicate_items([str(action) for action in actions])
+    if duplicates:
+        msg = "Duplicate workspace automation allowed actions are not allowed: " + ", ".join(duplicates)
+        raise ValueError(msg)
+    return actions
+
+
+_WorkspaceAutomationAllowedActions = Annotated[
+    list[_WorkspaceAutomationActionName] | None,
+    AfterValidator(_validate_unique_workspace_automation_actions),
+]
+
+
+class WorkspaceAutomationPolicyConfig(BaseModel):
+    """Policy gates for workspace-authored unattended automation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool | None = Field(
+        default=None,
+        description="Whether workspace-authored unattended automation may run",
+    )
+    min_interval_seconds: int | None = Field(  # noqa: F841, RUF100
+        default=None,
+        ge=60,
+        description="Minimum allowed interval between workspace-authored automation check runs",
+    )
+    max_timeout_seconds: int | None = Field(  # noqa: F841, RUF100
+        default=None,
+        ge=1,
+        description="Maximum allowed timeout for one workspace-authored automation check run",
+    )
+    max_output_bytes: int | None = Field(  # noqa: F841, RUF100
+        default=None,
+        ge=1024,
+        description="Maximum bytes of command output returned, trigger-evaluated, and persisted for one check run",
+    )
+    allowed_actions: _WorkspaceAutomationAllowedActions = Field(
+        default=None,
+        description="Visible workspace-authored automation actions allowed for this scope; none is always allowed",
     )
 
 
@@ -327,6 +377,18 @@ class DefaultsConfig(BaseModel):
     compaction: CompactionConfig | None = Field(
         default_factory=CompactionConfig,
         description="Default destructive compaction policy (set to null or enabled=false to disable automatic pre-reply compaction)",
+    )
+    workspace_automations: WorkspaceAutomationPolicyConfig = Field(
+        default_factory=lambda: WorkspaceAutomationPolicyConfig(
+            enabled=False,
+            min_interval_seconds=60,
+            max_timeout_seconds=30,
+            max_output_bytes=65536,
+            allowed_actions=[],
+        ),
+        description=(
+            "Default gates for workspace-authored unattended automation; does not affect normal scheduled tasks"
+        ),
     )
     num_history_runs: int | None = Field(
         default=None,

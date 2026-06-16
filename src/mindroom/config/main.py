@@ -49,6 +49,7 @@ from mindroom.config.models import (
     ModelConfig,
     RouterConfig,
     ToolConfigEntry,
+    WorkspaceAutomationPolicyConfig,
 )
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
 from mindroom.config.runtime_overlays import (
@@ -1161,6 +1162,24 @@ class Config(BaseModel):
             raise ValueError(msg)
         return self.defaults.compaction is not None or override is not None
 
+    def get_agent_workspace_automation_policy(
+        self,
+        agent_name: str,
+    ) -> WorkspaceAutomationPolicyConfig:
+        """Return the effective workspace-authored automation policy for one agent."""
+        agent_config = self.get_agent(agent_name)
+        merged = {
+            "enabled": False,
+            "min_interval_seconds": 60,
+            "max_timeout_seconds": 30,
+            "max_output_bytes": 65536,
+            "allowed_actions": [],
+        }
+        merged.update(self.defaults.workspace_automations.model_dump(exclude_none=True))
+        if agent_config.workspace_automations is not None:
+            merged.update(agent_config.workspace_automations.model_dump(exclude_none=True))
+        return WorkspaceAutomationPolicyConfig.model_validate(merged)
+
     def get_model_context_window(self, model_name: str) -> int | None:
         """Return the configured context window for one model name, when known."""
         model_config = self.models.get(model_name)
@@ -1842,6 +1861,9 @@ class Config(BaseModel):
             resolved_context_window = self.get_model_context_window(resolved_model_name)
 
         return ResolvedRuntimeModel(model_name=resolved_model_name, context_window=resolved_context_window)
+
+
+_CONFIG_PUBLIC_API_REFERENCES = (Config.get_agent_workspace_automation_policy,)
 
 
 def load_config(
