@@ -780,8 +780,10 @@ def _structured_output_from_buffers(
 
 
 def _tail_output_lines(text: str, tail: int) -> str:
-    if tail <= 0 or not text:
+    if not text:
         return text
+    if tail <= 0:
+        return ""
     return "\n".join(text.split("\n")[-tail:])
 
 

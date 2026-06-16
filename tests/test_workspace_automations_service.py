@@ -6,6 +6,7 @@ import asyncio
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
@@ -23,12 +24,11 @@ from mindroom.workspace_automations.models import (
     WorkspaceAutomationLoadResult,
     WorkspaceAutomationTrigger,
 )
-from mindroom.workspace_automations.service import AutomationKey, WorkspaceAutomationService
+from mindroom.workspace_automations.service import AutomationKey, WorkspaceAutomationService, _write_json_file
 from mindroom.workspace_automations.targets import WorkspaceAutomationTarget
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
-    from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -258,6 +258,53 @@ async def test_scan_interval_rescans_loaded_targets(
     assert target_call_count == 2
 
     await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_scan_loop_continues_after_transient_scan_failure(
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """A failed periodic scan should not permanently stop workspace discovery."""
+    config = _config(runtime_paths)
+    clock = _ControlledClock(datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC))
+    target_call_count = 0
+
+    def target_loader(_config: Config, _runtime_paths: RuntimePaths) -> list[WorkspaceAutomationTarget]:
+        nonlocal target_call_count
+        target_call_count += 1
+        if target_call_count == 2:
+            msg = "temporary scan failure"
+            raise RuntimeError(msg)
+        return [_target(tmp_path)]
+
+    service = WorkspaceAutomationService(
+        target_loader=target_loader,
+        automation_loader=lambda **_kwargs: WorkspaceAutomationLoadResult(),
+        now=clock.current_time,
+        sleep=clock.sleep,
+        scan_interval_seconds=12.5,
+    )
+
+    try:
+        await service.start(config, runtime_paths, HookRegistry.empty(), _bot_provider, object())
+        await clock.wait_for_sleep_count(1)
+
+        clock.resolve_next_sleep()
+        await clock.wait_for_sleep_count(1)
+
+        assert target_call_count == 2
+        assert service._scan_task is not None
+        assert not service._scan_task.done()
+
+        clock.resolve_next_sleep()
+        for _ in range(100):
+            if target_call_count == 3:
+                break
+            await asyncio.sleep(0)
+        assert target_call_count == 3
+    finally:
+        await service.shutdown()
 
 
 @pytest.mark.asyncio
@@ -614,6 +661,32 @@ async def test_concurrent_scans_do_not_lose_loaded_state_during_cancellation(
     assert len(active_tasks) == 1
 
     await service.shutdown()
+
+
+def test_write_json_file_replaces_state_without_direct_target_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """State persistence should write a temp file and atomically replace the target."""
+    state_path = tmp_path / "state.json"
+    state_path.write_text('{"old": true}\n', encoding="utf-8")
+    original_write_text = Path.write_text
+    direct_target_writes: list[str] = []
+
+    def guarded_write_text(self: Path, data: str, *args: object, **kwargs: object) -> int:
+        if self == state_path:
+            direct_target_writes.append(data)
+            original_write_text(self, "partial", encoding="utf-8")
+            msg = "direct target writes are not atomic"
+            raise RuntimeError(msg)
+        return original_write_text(self, data, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", guarded_write_text)
+
+    _write_json_file(state_path, {"new": True})
+
+    assert direct_target_writes == []
+    assert json.loads(state_path.read_text(encoding="utf-8")) == {"new": True}
 
 
 @pytest.mark.asyncio

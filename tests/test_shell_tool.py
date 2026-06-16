@@ -102,6 +102,27 @@ async def test_run_shell_command_structured_enforces_byte_cap_on_returned_output
 
 
 @pytest.mark.asyncio
+async def test_run_shell_command_structured_zero_tail_returns_empty_output(tmp_path: Path) -> None:
+    """A zero-line tail should return no output, not bypass output limiting."""
+    tool = _get_toolkit(tmp_path)
+    entrypoint = tool.async_functions["run_shell_command_structured"].entrypoint
+    assert entrypoint is not None
+
+    result = await entrypoint(
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.stdout.write('out'); sys.stderr.write('err')",
+        ],
+        tail=0,
+    )
+
+    assert result["stdout"] == ""
+    assert result["stderr"] == ""
+    assert result["raw_output"] == ""
+
+
+@pytest.mark.asyncio
 async def test_run_shell_command_structured_timeout_terminates_without_background_handle(tmp_path: Path) -> None:
     """Structured timeouts should stop the process instead of returning a background handle."""
     tool = _get_toolkit(tmp_path)

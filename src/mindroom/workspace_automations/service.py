@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
@@ -311,19 +313,19 @@ class WorkspaceAutomationService:
         await asyncio.gather(task, return_exceptions=True)
 
     async def _scan_loop(self) -> None:
-        try:
-            while not self._shutting_down:
-                interval = self.scan_interval_seconds
-                if interval is None:
-                    return
-                await self.sleep(interval)
-                if self._shutting_down:
-                    return
+        while not self._shutting_down:
+            interval = self.scan_interval_seconds
+            if interval is None:
+                return
+            await self.sleep(interval)
+            if self._shutting_down:
+                return
+            try:
                 await self.scan_now()
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            _LOGGER.exception("Workspace automation scan loop failed", error=str(exc))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _LOGGER.exception("Workspace automation scan loop failed", error=str(exc))
 
     async def _automation_loop(self, key: AutomationKey) -> None:
         try:
@@ -469,7 +471,14 @@ def _status_payload(status: _RunStatus) -> dict[str, object]:
 
 def _write_json_file(path: Path, payload: Mapping[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(f"{json.dumps(payload, indent=2, sort_keys=True)}\n", encoding="utf-8")
+    temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temp_path.write_text(f"{json.dumps(payload, indent=2, sort_keys=True)}\n", encoding="utf-8")
+        temp_path.replace(path)
+    except Exception:
+        with contextlib.suppress(OSError):
+            temp_path.unlink(missing_ok=True)
+        raise
 
 
 _ACTIVE_WORKSPACE_AUTOMATION_SERVICE: WorkspaceAutomationService | None = None
