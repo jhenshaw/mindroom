@@ -309,16 +309,27 @@ async def test_scan_result_load_errors_preserve_private_workspace_root(
     """Private workspace load errors should retain the concrete workspace file path."""
     config = _config(runtime_paths)
     private_workspace_root = tmp_path / "private_instances" / "alice" / "ops" / "workspace"
-    load_error = WorkspaceAutomationLoadError(
-        file_path=private_workspace_root / ".mindroom" / "automations.yaml",
+    expected_file_path = private_workspace_root / ".mindroom" / "automations.yaml"
+    expected_error = WorkspaceAutomationLoadError(
+        file_path=expected_file_path,
         automation_id="urgent_email_poll",
         field_path=("automations", "urgent_email_poll", "schedule"),
         message="schedule must be a valid cron expression",
     )
 
+    def automation_loader(**kwargs: object) -> WorkspaceAutomationLoadResult:
+        workspace_root = cast("Path", kwargs["workspace_root"])
+        load_error = WorkspaceAutomationLoadError(
+            file_path=workspace_root / ".mindroom" / "automations.yaml",
+            automation_id="urgent_email_poll",
+            field_path=("automations", "urgent_email_poll", "schedule"),
+            message="schedule must be a valid cron expression",
+        )
+        return WorkspaceAutomationLoadResult(errors=(load_error,))
+
     service = WorkspaceAutomationService(
         target_loader=lambda _config, _runtime_paths: [_target(private_workspace_root)],
-        automation_loader=lambda **_kwargs: WorkspaceAutomationLoadResult(errors=(load_error,)),
+        automation_loader=automation_loader,
         scan_interval_seconds=None,
     )
 
@@ -326,8 +337,8 @@ async def test_scan_result_load_errors_preserve_private_workspace_root(
 
     assert result.loaded_count == 0
     assert result.error_count == 1
-    assert result.errors == (load_error,)
-    assert str(private_workspace_root) in str(result.errors[0].file_path)
+    assert result.errors == (expected_error,)
+    assert result.errors[0].file_path == expected_file_path
     assert service.list_loaded() == ()
 
     await service.shutdown()
