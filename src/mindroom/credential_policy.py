@@ -30,19 +30,16 @@ OAUTH_CREDENTIAL_FIELDS = frozenset(
 )
 
 _OAUTH_CLIENT_CONFIG_SERVICE_SUFFIX = "_oauth_client"
-_MCP_OAUTH_TOKEN_SERVICE_PREFIX = "mcp_"  # noqa: S105
-_MCP_OAUTH_TOKEN_SERVICE_SUFFIX = "_oauth"  # noqa: S105
+_OAUTH_TOKEN_SERVICE_SUFFIX = "_oauth"  # noqa: S105
+# OAuth provider token services use the *_oauth naming contract. The separate
+# *_oauth_client app-client config contract intentionally does not match it.
 
 _LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES = frozenset(
     {
         "google_calendar",
-        "google_calendar_oauth",
         "google_drive",
-        "google_drive_oauth",
         "google_gmail",
-        "google_gmail_oauth",
         "google_sheets",
-        "google_sheets_oauth",
         "gmail",
         "homeassistant",
     },
@@ -51,21 +48,13 @@ _LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES = frozenset(
 _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS = frozenset(
     {
         "google_vertex_adc",
-        "google_calendar_oauth",
-        "google_drive_oauth",
-        "google_gmail_oauth",
-        "google_sheets_oauth",
     },
 )
 
 
-def _is_mcp_oauth_token_service(service: str) -> bool:
-    """Return whether a service is a generated MCP OAuth token service."""
-    return (
-        service.startswith(_MCP_OAUTH_TOKEN_SERVICE_PREFIX)
-        and service.endswith(_MCP_OAUTH_TOKEN_SERVICE_SUFFIX)
-        and not is_oauth_client_config_service(service)
-    )
+def _is_oauth_token_service(service: str) -> bool:
+    """Return whether a service name follows the OAuth token naming contract."""
+    return service.endswith(_OAUTH_TOKEN_SERVICE_SUFFIX)
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,7 +71,8 @@ class _CredentialServicePolicy:
 
 def credential_service_policy(service: str, worker_scope: _WorkerScope | None) -> _CredentialServicePolicy:
     """Return credential placement policy for one service in one worker scope."""
-    is_local_only = service in _LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES or _is_mcp_oauth_token_service(service)
+    is_oauth_token_service = _is_oauth_token_service(service)
+    is_local_only = service in _LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES or is_oauth_token_service
     is_primary_runtime_global = is_oauth_client_config_service(service)
     return _CredentialServicePolicy(
         service=service,
@@ -93,7 +83,7 @@ def credential_service_policy(service: str, worker_scope: _WorkerScope | None) -
             worker_scope in {"user", "user_agent"} and is_local_only and not is_primary_runtime_global
         ),
         worker_grantable_supported=not is_primary_runtime_global
-        and not _is_mcp_oauth_token_service(service)
+        and not is_oauth_token_service
         and service not in _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS,
     )
 
