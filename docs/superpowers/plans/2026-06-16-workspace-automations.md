@@ -5,10 +5,11 @@
 
 **Goal:** Build agent-owned declarative workspace automations that run deterministic cron checks through the existing worker backend and only invoke Matrix, hooks, or LLM work when explicit trigger rules match.
 
-**Architecture:** Automation definitions live in `<agent-workspace>/.mindroom/automations.yaml`, while the primary MindRoom runtime owns discovery, validation, scheduling, execution, and supervision.
+**Architecture:** Automation definitions live in a concrete workspace instance at `<workspace>/.mindroom/automations.yaml`, while the primary MindRoom runtime owns discovery, validation, scheduling, execution, and supervision.
 Worker containers are provisioned on demand through the same worker routing path used by shell/file/python tools.
 In Kubernetes, workers may scale to zero between runs while persistent worker state may survive; automation correctness must not depend on a live container.
-The first implementation supports shared agent workspaces and leaves requester-private workspace automations blocked until a durable execution-identity registry exists.
+Shared agent workspaces are discovered from config because they have no requester identity.
+Requester-private workspace automations are discovered from a durable workspace instance registry written when that private workspace is actually materialized.
 
 **Tech Stack:** Python 3.13, Pydantic, croniter, PyYAML, asyncio, existing MindRoom worker routing, existing hook registry, existing Matrix delivery helpers, pytest.
 
@@ -20,8 +21,13 @@ This plan adds a new workspace automation system.
 It does not replace `!schedule` or the existing scheduler tool.
 It adds deterministic polling jobs for cheap checks that may optionally escalate to an LLM, Matrix message, or plugin hook.
 
-The first version supports shared agents only.
-Private agents and requester-scoped materializations require a follow-up registry because the runtime cannot safely reconstruct a private requester execution identity from workspace paths alone.
+The first version supports shared agent workspaces and already-materialized private agent workspace instances.
+Private workspace automations must never be discovered by reconstructing requester identity from path names.
+They must use persisted execution identity from the workspace instance registry.
+MindRoom must not proactively create private workspaces for every possible requester just to scan automations.
+
+Shared agents that use `worker_scope: user` or `worker_scope: user_agent` remain ineligible unless there is a concrete private workspace instance carrying a persisted execution identity.
+`worker_scope` controls worker reuse and does not by itself create requester-owned workspace state.
 
 The first version supports `shell` checks only.
 The data model should leave room for future check types, but no other check type should be implemented in this PR.
@@ -38,7 +44,11 @@ Create `src/mindroom/workspace_automations/loader.py`.
 This file reads and validates `.mindroom/automations.yaml` files from resolved agent workspaces.
 
 Create `src/mindroom/workspace_automations/targets.py`.
-This file resolves enabled shared agents, workspaces, worker scope, and Matrix action targets.
+This file resolves enabled shared workspaces, existing private workspace instances, worker scope, and Matrix action targets.
+
+Create `src/mindroom/workspace_instances.py`.
+This file owns the durable registry for concrete workspace materializations.
+It stores the workspace root, agent name, execution scope, worker key, private/shared marker, and serialized execution identity needed for unattended runtime reconstruction.
 
 Create `src/mindroom/workspace_automations/executor.py`.
 This file executes deterministic checks through the shell toolkit's structured command function with existing worker routing.
@@ -812,7 +822,8 @@ Document `.mindroom/automations.yaml`.
 Document policy gates.
 Document Kubernetes behavior.
 Document that worker containers may scale to zero between runs while persistent worker state may survive.
-Document that private workspace automations are not supported in the first version.
+Document that private workspace automations work only for already-materialized private workspace instances with a persisted execution identity.
+Document that MindRoom does not proactively create private workspaces for every possible requester.
 
 - [ ] **Step 2: Keep Markdown style**
 
@@ -833,7 +844,7 @@ git add docs/workspace-automations.md docs/scheduling.md docs/deployment/sandbox
 git commit -m "docs: explain workspace automations"
 ```
 
-## Task 12: Final Verification
+## Task 12: Shared Automation Baseline Verification
 
 **Files:**
 
@@ -892,10 +903,224 @@ Expected: PASS.
 Use targeted adds only.
 Never run `git add .`.
 
-## Follow-Up Work Not In This PR
+## Task 13: Add Workspace Instance Registry For Private Materializations
 
-Private workspace automations need a durable execution identity registry.
-That registry must be written when private workspaces are materialized and must survive restart.
+**Files:**
+
+- Create: `src/mindroom/workspace_instances.py`
+- Modify: `src/mindroom/runtime_resolution.py`
+- Test: `tests/test_workspace_instances.py`
+
+- [ ] **Step 1: Write failing registry tests**
+
+Add tests that resolving a private agent runtime with an execution identity writes one durable workspace instance record.
+Add tests that the record round-trips the serialized `ToolExecutionIdentity`, `worker_key`, `execution_scope`, `agent_name`, `workspace_root`, `state_root`, and `is_private` marker.
+Add tests that the registry write is idempotent and replaces the same logical instance without duplicating entries.
+Add tests that malformed registry entries are skipped rather than crashing discovery.
+Add a test that concurrent registry writes from multiple private runtime materializations do not lose entries.
+
+- [ ] **Step 2: Run focused tests and verify failure**
+
+Run: `uv run pytest tests/test_workspace_instances.py -q`.
+Expected: FAIL because the registry module does not exist.
+
+- [ ] **Step 3: Implement the registry**
+
+Create a small dataclass, for example `WorkspaceInstanceRecord`, with typed fields instead of unstructured dicts.
+Store registry data at `runtime_paths.storage_root / "workspace_instances" / "instances.json"`.
+Use `serialize_tool_execution_identity` and `parse_tool_execution_identity_payload` for execution identity payloads.
+Write the JSON file atomically with a same-directory temporary file and `Path.replace`.
+Protect the full read-modify-write operation with a process-local `threading.Lock` because agent runtime resolution can run on worker threads.
+Use a stable registry key derived from `agent_name`, `workspace_root`, and `worker_key or "shared"`.
+
+- [ ] **Step 4: Register runtime materializations**
+
+In `resolve_agent_runtime`, after a workspace has been resolved and created or found, record the workspace instance when the workspace root exists.
+Private instances must include the non-`None` execution identity and worker key.
+Shared instances may be recorded too, but target discovery must not depend on shared registry records.
+
+- [ ] **Step 5: Run focused tests**
+
+Run: `uv run pytest tests/test_workspace_instances.py tests/test_agents.py::test_private_agent_workspace_is_requester_scoped -q`.
+Expected: PASS.
+
+- [ ] **Step 6: Commit**
+
+Run:
+
+```bash
+git add src/mindroom/workspace_instances.py src/mindroom/runtime_resolution.py tests/test_workspace_instances.py
+git commit -m "feat: persist workspace instance records"
+```
+
+## Task 14: Discover Private Workspace Automation Targets From Registry
+
+**Files:**
+
+- Modify: `src/mindroom/workspace_automations/targets.py`
+- Modify: `tests/test_workspace_automations_targets.py`
+
+- [ ] **Step 1: Write failing target discovery tests**
+
+Replace the test that asserts private agents are skipped with tests that an existing private workspace instance with enabled policy becomes a target.
+Add a test that private agents with no registered workspace instance are not proactively created.
+Add a test that stale registry records are skipped when the agent no longer exists, the workspace does not exist, the policy is disabled, the record is not private, or the record has no execution identity.
+Add a test that identity-bearing shared records are ignored by private target discovery.
+Keep tests that shared `worker_scope: user` and `worker_scope: user_agent` agents are skipped without a concrete private workspace instance.
+
+- [ ] **Step 2: Run focused tests and verify failure**
+
+Run: `uv run pytest tests/test_workspace_automations_targets.py -q`.
+Expected: FAIL because private targets are still skipped.
+
+- [ ] **Step 3: Refactor target discovery**
+
+Keep config-driven shared target discovery for enabled non-private agents.
+Add registry-driven private target discovery for existing private workspace instances.
+Only use registry records where `is_private is True`.
+For each private record, call `resolve_agent_runtime(agent_name, config, runtime_paths, execution_identity=record.execution_identity, create=False)`.
+Require the resolved workspace root to match the registered workspace root.
+Carry the resolved runtime on `WorkspaceAutomationTarget`.
+Update the target docstring so it describes concrete workspace instances rather than shared agents only.
+
+- [ ] **Step 4: Run focused tests**
+
+Run: `uv run pytest tests/test_workspace_automations_targets.py -q`.
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+Run:
+
+```bash
+git add src/mindroom/workspace_automations/targets.py tests/test_workspace_automations_targets.py
+git commit -m "feat: discover private workspace automations"
+```
+
+## Task 15: Run Automation Checks With The Target's Persisted Identity
+
+**Files:**
+
+- Modify: `src/mindroom/workspace_automations/executor.py`
+- Modify: `tests/test_workspace_automations_executor.py`
+
+- [ ] **Step 1: Write failing executor tests**
+
+Add a test where the target runtime has a private execution identity and assert `build_agent_toolkit` receives that exact identity.
+Add a test that shared targets still synthesize the existing automation identity for shared shell execution.
+Add a test that the private target session id is not overwritten.
+
+- [ ] **Step 2: Run focused tests and verify failure**
+
+Run: `uv run pytest tests/test_workspace_automations_executor.py -q`.
+Expected: FAIL because `run_shell_check` currently builds a requester-less identity unconditionally.
+
+- [ ] **Step 3: Implement identity selection**
+
+Use `target.agent_runtime.execution_identity` when present.
+Only call `build_tool_execution_identity` for targets whose resolved runtime has no execution identity.
+Pass the selected identity unchanged into `build_agent_toolkit`.
+Do not mutate the persisted private identity just to add a workspace automation session id.
+
+- [ ] **Step 4: Run focused tests**
+
+Run: `uv run pytest tests/test_workspace_automations_executor.py -q`.
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+Run:
+
+```bash
+git add src/mindroom/workspace_automations/executor.py tests/test_workspace_automations_executor.py
+git commit -m "fix: run automations with persisted target identity"
+```
+
+## Task 16: Update Service Status And Documentation For Workspace Instances
+
+**Files:**
+
+- Modify: `src/mindroom/workspace_automations/service.py`
+- Modify: `docs/workspace-automations.md`
+- Modify: `docs/deployment/sandbox-proxy.md`
+- Modify: `tests/test_workspace_automations_service.py`
+
+- [ ] **Step 1: Write failing service/docs-adjacent tests**
+
+Add or update service tests so two targets with the same `agent_name` and `automation_id` but different workspace roots remain separate.
+Add a test that private target load errors include the private workspace root in the automation key.
+
+- [ ] **Step 2: Run focused tests and verify failure if behavior is missing**
+
+Run: `uv run pytest tests/test_workspace_automations_service.py -q`.
+Expected: FAIL if any keying or status behavior still assumes one shared target per agent.
+
+- [ ] **Step 3: Update docs**
+
+Replace wording that says private workspace automations are unsupported.
+Document that private automations are supported only after the private workspace has been materialized by a real requester interaction.
+Document that shared requester-scoped `worker_scope` agents are still skipped because they have no requester-owned workspace instance.
+Keep the Kubernetes explanation deployment-agnostic: the scheduler is central, workers execute on demand.
+
+- [ ] **Step 4: Run focused tests**
+
+Run: `uv run pytest tests/test_workspace_automations_service.py -q`.
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+Run:
+
+```bash
+git add src/mindroom/workspace_automations/service.py tests/test_workspace_automations_service.py docs/workspace-automations.md docs/deployment/sandbox-proxy.md
+git commit -m "docs: document private workspace automations"
+```
+
+## Task 17: Final Private Workspace Automation Verification
+
+**Files:**
+
+- No new files unless failures require fixes.
+
+- [ ] **Step 1: Run focused private automation tests**
+
+Run:
+
+```bash
+uv run pytest \
+  tests/test_workspace_instances.py \
+  tests/test_workspace_automations_targets.py \
+  tests/test_workspace_automations_executor.py \
+  tests/test_workspace_automations_service.py \
+  -q
+```
+
+Expected: PASS.
+
+- [ ] **Step 2: Run all workspace automation tests**
+
+Run:
+
+```bash
+uv run pytest tests/test_workspace_automations_*.py tests/test_workspace_automation_tool.py -q
+```
+
+Expected: PASS.
+
+- [ ] **Step 3: Run broader regressions**
+
+Run: `uv run pytest tests/test_agents.py tests/test_shell_tool.py -q`.
+Expected: PASS.
+
+- [ ] **Step 4: Run full verification before final claim**
+
+Run: `uv run pytest`.
+Expected: PASS.
+
+Run: `uv run pre-commit run --all-files`.
+Expected: PASS.
+
+## Follow-Up Work Not In This PR
 
 Kubernetes CronJob provider support is not in scope.
 It can be considered later only for firing automations while the primary MindRoom runtime is down.
