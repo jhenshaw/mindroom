@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.workspace_instances import load_workspace_instance_records
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -18,13 +19,12 @@ if TYPE_CHECKING:
     from mindroom.runtime_resolution import ResolvedAgentRuntime
 
 _LOGGER = logging.getLogger(__name__)
-_PRIVATE_AGENT_SKIP_REASON = "private workspace automations are not supported yet"
 _REQUESTER_SCOPED_SKIP_REASON = "requester-scoped workspace automations require a live requester identity"
 
 
 @dataclass(frozen=True)
 class WorkspaceAutomationTarget:
-    """Resolved runtime target for one shared agent's workspace automations."""
+    """Resolved runtime target for one concrete workspace automation instance."""
 
     agent_name: str
     agent_configured_rooms: tuple[str, ...]
@@ -37,7 +37,18 @@ def iter_workspace_automation_targets(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> list[WorkspaceAutomationTarget]:
-    """Return shared agents with enabled automations and a resolved workspace."""
+    """Return concrete workspace instances with enabled automations and resolved runtimes."""
+    targets: list[WorkspaceAutomationTarget] = []
+    targets.extend(_iter_shared_workspace_automation_targets(config, runtime_paths))
+    targets.extend(_iter_private_workspace_automation_targets(config, runtime_paths))
+    return targets
+
+
+def _iter_shared_workspace_automation_targets(
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> list[WorkspaceAutomationTarget]:
+    """Return config-driven shared agents with enabled automations and a resolved workspace."""
     targets: list[WorkspaceAutomationTarget] = []
     for agent_name, agent_config in config.agents.items():
         policy = config.get_agent_workspace_automation_policy(agent_name)
@@ -49,11 +60,6 @@ def iter_workspace_automation_targets(
             continue
 
         if agent_config.private is not None:
-            _LOGGER.info(
-                "Skipping workspace automation target for private agent '%s': %s.",
-                agent_name,
-                _PRIVATE_AGENT_SKIP_REASON,
-            )
             continue
 
         agent_runtime = resolve_agent_runtime(
@@ -89,6 +95,87 @@ def iter_workspace_automation_targets(
         )
 
     return targets
+
+
+def _iter_private_workspace_automation_targets(
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> list[WorkspaceAutomationTarget]:
+    """Return registry-driven private workspace instances with enabled automations."""
+    targets: list[WorkspaceAutomationTarget] = []
+    for record in load_workspace_instance_records(runtime_paths):
+        if record.is_private is not True:
+            continue
+
+        agent_config = config.agents.get(record.agent_name)
+        if agent_config is None:
+            _LOGGER.info(
+                "Skipping private workspace automation target for agent '%s': agent no longer exists.",
+                record.agent_name,
+            )
+            continue
+        if agent_config.private is None:
+            _LOGGER.info(
+                "Skipping private workspace automation target for agent '%s': agent is no longer private.",
+                record.agent_name,
+            )
+            continue
+
+        policy = config.get_agent_workspace_automation_policy(record.agent_name)
+        if not policy.enabled:
+            _LOGGER.debug(
+                "Skipping private workspace automation target for agent '%s': workspace automations are disabled.",
+                record.agent_name,
+            )
+            continue
+        if record.execution_identity is None:
+            _LOGGER.info(
+                "Skipping private workspace automation target for agent '%s': missing execution identity.",
+                record.agent_name,
+            )
+            continue
+
+        agent_runtime = resolve_agent_runtime(
+            record.agent_name,
+            config,
+            runtime_paths,
+            execution_identity=record.execution_identity,
+            create=False,
+        )
+        if agent_runtime.workspace is None:
+            _LOGGER.info(
+                "Skipping private workspace automation target for agent '%s': no usable workspace resolved.",
+                record.agent_name,
+            )
+            continue
+        if not record.workspace_root.is_dir():
+            _LOGGER.info(
+                "Skipping private workspace automation target for agent '%s': registered workspace does not exist.",
+                record.agent_name,
+            )
+            continue
+        if not _paths_match(agent_runtime.workspace.root, record.workspace_root):
+            _LOGGER.info(
+                "Skipping private workspace automation target for agent '%s': registered workspace root is stale.",
+                record.agent_name,
+            )
+            continue
+
+        targets.append(
+            WorkspaceAutomationTarget(
+                agent_name=record.agent_name,
+                agent_configured_rooms=tuple(agent_config.rooms),
+                policy=policy,
+                agent_runtime=agent_runtime,
+                workspace_root=agent_runtime.workspace.root,
+            ),
+        )
+
+    return targets
+
+
+def _paths_match(left: Path, right: Path) -> bool:
+    return left.expanduser().resolve() == right.expanduser().resolve()
 
 
 def resolve_action_room(

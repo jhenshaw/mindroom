@@ -10,9 +10,10 @@ import pytest
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.runtime_resolution import resolve_agent_runtime as resolve_runtime
-from mindroom.tool_system.worker_routing import agent_workspace_root_path
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from mindroom.workspace_automations import targets
 from mindroom.workspace_automations.targets import iter_workspace_automation_targets, resolve_action_room
+from mindroom.workspace_instances import WorkspaceInstanceRecord
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -25,6 +26,8 @@ def runtime_paths(tmp_path: Path) -> RuntimePaths:
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "mindroom_data",
         process_env={
+            "CUSTOMER_ID": "tenant-123",
+            "ACCOUNT_ID": "account-456",
             "MATRIX_HOMESERVER": "http://localhost:8008",
             "MINDROOM_NAMESPACE": "",
         },
@@ -38,6 +41,44 @@ def _config(runtime_paths: RuntimePaths, agents: dict[str, dict[str, object]]) -
             "agents": agents,
         },
         runtime_paths,
+    )
+
+
+def _identity(
+    agent_name: str,
+    requester_id: str = "@alice:example.org",
+    *,
+    session_id: str = "session-1",
+) -> ToolExecutionIdentity:
+    return ToolExecutionIdentity(
+        channel="matrix",
+        agent_name=agent_name,
+        requester_id=requester_id,
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id=session_id,
+        tenant_id="tenant-123",
+        account_id="account-456",
+        transport_agent_name=f"mindroom_{agent_name}",
+    )
+
+
+def _workspace_instance_record(
+    *,
+    agent_name: str,
+    workspace_root: Path,
+    execution_identity: ToolExecutionIdentity | None,
+    is_private: bool = True,
+) -> WorkspaceInstanceRecord:
+    return WorkspaceInstanceRecord(
+        agent_name=agent_name,
+        workspace_root=workspace_root,
+        state_root=workspace_root.parent,
+        execution_scope="user",
+        execution_identity=execution_identity,
+        worker_key=f"worker-key-{agent_name}",
+        is_private=is_private,
     )
 
 
@@ -157,11 +198,48 @@ def test_no_room_or_missing_room_ambiguity_returns_none() -> None:
     assert resolve_action_room(action_room=None, agent_configured_rooms=[]) is None
 
 
-def test_private_agents_are_skipped_with_a_clear_reason(
-    caplog: pytest.LogCaptureFixture,
+def test_existing_private_workspace_instance_with_enabled_policy_becomes_target(
     runtime_paths: RuntimePaths,
 ) -> None:
-    """Private agents should be reported as unsupported automation targets."""
+    """Already-materialized private workspace instances should become automation targets."""
+    config = _config(
+        runtime_paths,
+        {
+            "mind": {
+                "display_name": "Mind",
+                "private": {"per": "user"},
+                "rooms": ["Private"],
+                "workspace_automations": {
+                    "enabled": True,
+                    "allowed_actions": ["agent_message"],
+                },
+            },
+        },
+    )
+    identity = _identity("mind")
+    private_runtime = resolve_runtime("mind", config, runtime_paths, execution_identity=identity, create=True)
+    assert private_runtime.workspace is not None
+
+    result = iter_workspace_automation_targets(config, runtime_paths)
+
+    assert len(result) == 1
+    target = result[0]
+    assert target.agent_name == "mind"
+    assert target.agent_configured_rooms == ("Private",)
+    assert target.policy.enabled is True
+    assert target.policy.allowed_actions == ["agent_message"]
+    assert target.agent_runtime.is_private is True
+    assert target.agent_runtime.execution_identity == identity
+    assert target.agent_runtime.worker_key == private_runtime.worker_key
+    assert target.agent_runtime.workspace is not None
+    assert target.agent_runtime.workspace.root == private_runtime.workspace.root
+    assert target.workspace_root == private_runtime.workspace.root
+
+
+def test_private_agents_without_registered_workspace_instance_are_not_proactively_created(
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Private automation discovery should not materialize every possible requester workspace."""
     config = _config(
         runtime_paths,
         {
@@ -172,13 +250,127 @@ def test_private_agents_are_skipped_with_a_clear_reason(
             },
         },
     )
-    caplog.set_level("INFO", logger="mindroom.workspace_automations.targets")
 
     result = iter_workspace_automation_targets(config, runtime_paths)
 
     assert result == []
-    assert "Skipping workspace automation target for private agent 'mind'" in caplog.text
-    assert "private workspace automations are not supported yet" in caplog.text
+    assert not (runtime_paths.storage_root / "private_instances").exists()
+
+
+def test_stale_private_registry_records_are_skipped(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Private registry discovery should ignore records that no longer describe usable targets."""
+    config = _config(
+        runtime_paths,
+        {
+            "no_workspace": {
+                "display_name": "No Workspace",
+                "private": {"per": "user"},
+                "workspace_automations": {"enabled": True},
+            },
+            "disabled": {
+                "display_name": "Disabled",
+                "private": {"per": "user"},
+                "workspace_automations": {"enabled": False},
+            },
+            "shared_record": {
+                "display_name": "Shared Record",
+                "worker_scope": "user",
+                "workspace_automations": {"enabled": True},
+            },
+            "no_identity": {
+                "display_name": "No Identity",
+                "private": {"per": "user"},
+                "workspace_automations": {"enabled": True},
+            },
+        },
+    )
+    no_workspace_runtime = resolve_runtime(
+        "no_workspace",
+        config,
+        runtime_paths,
+        execution_identity=_identity("no_workspace"),
+        create=False,
+    )
+    assert no_workspace_runtime.workspace is not None
+    disabled_root = runtime_paths.storage_root / "stale" / "disabled"
+    disabled_root.mkdir(parents=True)
+    shared_record_root = runtime_paths.storage_root / "stale" / "shared_record"
+    shared_record_root.mkdir(parents=True)
+    no_identity_root = runtime_paths.storage_root / "stale" / "no_identity"
+    no_identity_root.mkdir(parents=True)
+    missing_agent_root = runtime_paths.storage_root / "stale" / "missing_agent"
+    missing_agent_root.mkdir(parents=True)
+    stale_records = [
+        _workspace_instance_record(
+            agent_name="missing_agent",
+            workspace_root=missing_agent_root,
+            execution_identity=_identity("missing_agent"),
+        ),
+        _workspace_instance_record(
+            agent_name="no_workspace",
+            workspace_root=no_workspace_runtime.workspace.root,
+            execution_identity=_identity("no_workspace"),
+        ),
+        _workspace_instance_record(
+            agent_name="disabled",
+            workspace_root=disabled_root,
+            execution_identity=_identity("disabled"),
+        ),
+        _workspace_instance_record(
+            agent_name="shared_record",
+            workspace_root=shared_record_root,
+            execution_identity=_identity("shared_record"),
+            is_private=False,
+        ),
+        _workspace_instance_record(
+            agent_name="no_identity",
+            workspace_root=no_identity_root,
+            execution_identity=None,
+        ),
+    ]
+    monkeypatch.setattr(targets, "load_workspace_instance_records", lambda _runtime_paths: stale_records, raising=False)
+
+    result = iter_workspace_automation_targets(config, runtime_paths)
+
+    assert result == []
+
+
+def test_identity_bearing_shared_registry_records_are_ignored_by_private_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Shared registry records should not become requester-owned private automation targets."""
+    config = _config(
+        runtime_paths,
+        {
+            "ops": {
+                "display_name": "Ops",
+                "worker_scope": "user",
+                "workspace_automations": {"enabled": True},
+            },
+        },
+    )
+    workspace_root = agent_workspace_root_path(runtime_paths.storage_root, "ops")
+    workspace_root.mkdir(parents=True)
+    identity_bearing_shared_record = _workspace_instance_record(
+        agent_name="ops",
+        workspace_root=workspace_root,
+        execution_identity=_identity("ops"),
+        is_private=False,
+    )
+    monkeypatch.setattr(
+        targets,
+        "load_workspace_instance_records",
+        lambda _runtime_paths: [identity_bearing_shared_record],
+        raising=False,
+    )
+
+    result = iter_workspace_automation_targets(config, runtime_paths)
+
+    assert result == []
 
 
 @pytest.mark.parametrize("worker_scope", ["user", "user_agent"])
