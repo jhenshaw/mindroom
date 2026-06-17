@@ -125,6 +125,9 @@ There is one central scheduler, not one platform-native scheduler per automation
 Worker runtimes execute shell checks on demand when the central scheduler reaches a due time.
 Shell checks use the same worker-routed `shell` tool path as ordinary shell calls.
 This means worker backend, worker scope, workspace home, environment filtering, and credential lease behavior come from the normal shell tool deployment.
+Shell checks also honor the effective shell tool config, including `enable_run_shell_command`, `extra_env_passthrough`, and `shell_path_prepend`.
+Because workspace automations run unattended, shell checks fail closed when shell tool approval would be required or when any `tool:before_call` hook is registered.
+Use workspace automation policy, shell tool config, and `automation:triggered` hooks for unattended automation authorization instead of interactive tool gates.
 Dedicated worker backends may scale down between automation runs.
 MindRoom re-ensures or recreates the worker on the next due run before executing the shell check.
 MindRoom does not create platform-native cron resources or keep dedicated workers alive just because an automation exists.

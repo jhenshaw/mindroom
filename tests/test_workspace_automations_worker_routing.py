@@ -12,6 +12,7 @@ import mindroom.tools  # noqa: F401
 from mindroom.agents import build_agent_toolkit, resolve_runtime_worker_tools
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.hooks import HookRegistry
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, build_tool_execution_identity, resolve_worker_key
 from mindroom.workers.models import WorkerHandle, WorkerSpec
@@ -382,6 +383,7 @@ async def test_automation_shell_check_routes_to_same_worker_target_as_normal_she
     automation_result = await run_shell_check(
         config=config,
         runtime_paths=runtime_paths,
+        hook_registry=HookRegistry.empty(),
         target=target,
         automation=_automation(target),
     )
@@ -438,6 +440,7 @@ async def test_due_automation_run_ensures_worker_again_after_kubernetes_idle_cle
     first_result = await run_shell_check(
         config=config,
         runtime_paths=runtime_paths,
+        hook_registry=HookRegistry.empty(),
         target=target,
         automation=automation,
     )
@@ -445,6 +448,7 @@ async def test_due_automation_run_ensures_worker_again_after_kubernetes_idle_cle
     second_result = await run_shell_check(
         config=config,
         runtime_paths=runtime_paths,
+        hook_registry=HookRegistry.empty(),
         target=target,
         automation=automation,
     )

@@ -8,7 +8,9 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.config.main import Config
+from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, hook
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.workspace_automations.executor import run_shell_check
@@ -275,6 +277,7 @@ async def test_shell_check_runs_through_worker_routed_shell_toolkit(  # noqa: PL
     result = await run_shell_check(
         config=config,
         runtime_paths=runtime_paths,
+        hook_registry=HookRegistry.empty(),
         target=target,
         automation=automation,
     )
@@ -301,7 +304,7 @@ async def test_shell_check_honors_shell_tool_config_overrides(runtime_paths: Run
             "agents": {
                 "ops": {
                     "display_name": "Ops",
-                    "tools": [{"shell": {"enable_run_shell_command": False}}],
+                    "tools": ["openclaw_compat", {"shell": {"enable_run_shell_command": False}}],
                     "worker_scope": "shared",
                     "workspace_automations": {
                         "enabled": True,
@@ -317,12 +320,87 @@ async def test_shell_check_honors_shell_tool_config_overrides(runtime_paths: Run
     result = await run_shell_check(
         config=config,
         runtime_paths=runtime_paths,
+        hook_registry=HookRegistry.empty(),
         target=target,
         automation=_automation(target),
     )
 
     assert result.ok is False
     assert result.error == "Shell toolkit did not expose structured execution."
+
+
+@pytest.mark.asyncio
+async def test_shell_check_fails_closed_when_shell_approval_is_required(
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Unattended automation checks should not bypass shell approval policy."""
+    config = Config.validate_with_runtime(
+        {
+            "memory": {"backend": "none"},
+            "defaults": {"worker_tools": ["shell"]},
+            "tool_approval": {
+                "rules": [{"match": "run_shell_command", "action": "require_approval"}],
+            },
+            "agents": {
+                "ops": {
+                    "display_name": "Ops",
+                    "worker_scope": "shared",
+                    "workspace_automations": {
+                        "enabled": True,
+                        "max_output_bytes": 4096,
+                    },
+                },
+            },
+        },
+        runtime_paths,
+    )
+    target = _resolve_target(config, runtime_paths, execution_identity=None)
+
+    result = await run_shell_check(
+        config=config,
+        runtime_paths=runtime_paths,
+        hook_registry=HookRegistry.empty(),
+        target=target,
+        automation=_automation(target),
+    )
+
+    assert result.ok is False
+    assert result.error == "Workspace automation shell checks cannot run when shell tool approval is required."
+
+
+@pytest.mark.asyncio
+async def test_shell_check_fails_closed_when_tool_before_call_hooks_exist(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    target: WorkspaceAutomationTarget,
+) -> None:
+    """Unattended automation checks should not bypass tool before-call gates."""
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def guard(_context: object) -> None:
+        return None
+
+    hook_registry = HookRegistry.from_plugins(
+        [
+            SimpleNamespace(
+                name="shell-guard",
+                discovered_hooks=(guard,),
+                entry_config=PluginEntryConfig(path="./plugins/shell-guard"),
+                plugin_order=0,
+            ),
+        ],
+    )
+
+    result = await run_shell_check(
+        config=config,
+        runtime_paths=runtime_paths,
+        hook_registry=hook_registry,
+        target=target,
+        automation=_automation(target),
+    )
+
+    assert result.ok is False
+    assert result.error == "Workspace automation shell checks cannot run while tool:before_call hooks are registered."
 
 
 @pytest.mark.asyncio
@@ -363,6 +441,7 @@ async def test_shell_check_uses_private_target_persisted_execution_identity(
     result = await run_shell_check(
         config=private_config,
         runtime_paths=runtime_paths,
+        hook_registry=HookRegistry.empty(),
         target=private_target,
         automation=automation,
     )
@@ -402,6 +481,7 @@ async def test_shell_check_synthesizes_automation_identity_for_shared_targets(
     result = await run_shell_check(
         config=config,
         runtime_paths=runtime_paths,
+        hook_registry=HookRegistry.empty(),
         target=target,
         automation=automation,
     )
@@ -453,6 +533,7 @@ async def test_shell_check_does_not_overwrite_private_target_session_id(
     result = await run_shell_check(
         config=private_config,
         runtime_paths=runtime_paths,
+        hook_registry=HookRegistry.empty(),
         target=private_target,
         automation=automation,
     )
@@ -488,6 +569,7 @@ async def test_shell_check_returns_failed_result_when_toolkit_construction_raise
     result = await run_shell_check(
         config=config,
         runtime_paths=runtime_paths,
+        hook_registry=HookRegistry.empty(),
         target=target,
         automation=automation,
     )
@@ -533,6 +615,7 @@ async def test_shell_check_returns_failed_result_when_structured_command_raises(
     result = await run_shell_check(
         config=config,
         runtime_paths=runtime_paths,
+        hook_registry=HookRegistry.empty(),
         target=target,
         automation=automation,
     )

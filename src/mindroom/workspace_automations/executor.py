@@ -8,15 +8,20 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 from mindroom.agents import build_agent_toolkit, resolve_runtime_worker_tools
+from mindroom.hooks import EVENT_TOOL_BEFORE_CALL
+from mindroom.tool_approval import evaluate_tool_approval
+from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.hooks import HookRegistry
     from mindroom.workspace_automations.models import LoadedWorkspaceAutomation
     from mindroom.workspace_automations.targets import WorkspaceAutomationTarget
 
 _STRUCTURED_SHELL_FUNCTION_NAME = "run_shell_command_structured"
+_PUBLIC_SHELL_FUNCTION_NAME = "run_shell_command"
 
 
 @dataclass(frozen=True)
@@ -37,11 +42,26 @@ async def run_shell_check(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
+    hook_registry: HookRegistry,
     target: WorkspaceAutomationTarget,
     automation: LoadedWorkspaceAutomation,
 ) -> ShellCheckResult:
     """Run one workspace automation shell check through the agent shell toolkit."""
     try:
+        if hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL):
+            return _failed_result(
+                automation.automation_id,
+                "Workspace automation shell checks cannot run while tool:before_call hooks are registered.",
+            )
+        approval_error = await _tool_approval_error(
+            config=config,
+            runtime_paths=runtime_paths,
+            target=target,
+            automation=automation,
+        )
+        if approval_error is not None:
+            return _failed_result(automation.automation_id, approval_error)
+
         execution_identity = target.agent_runtime.execution_identity
         if execution_identity is None:
             execution_identity = build_tool_execution_identity(
@@ -113,9 +133,41 @@ def _result_from_payload(automation_id: str, payload: object) -> ShellCheckResul
 
 
 def _shell_tool_config_overrides(config: Config, agent_name: str) -> dict[str, object] | None:
-    for entry in config.get_agent_tool_configs(agent_name):
+    tool_surface = visible_tool_surface(
+        agent_name=agent_name,
+        config=config,
+        session_id=None,
+        enable_dynamic_tools_manager=False,
+    )
+    for entry in tool_surface.runtime_tool_configs:
         if entry.name == "shell":
             return dict(entry.tool_config_overrides)
+    return None
+
+
+async def _tool_approval_error(
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    target: WorkspaceAutomationTarget,
+    automation: LoadedWorkspaceAutomation,
+) -> str | None:
+    arguments = {
+        "args": automation.check.command,
+        "tail": automation.check.tail,
+        "timeout": automation.check.timeout_seconds,
+        "max_output_bytes": target.policy.max_output_bytes,
+    }
+    for tool_name in (_STRUCTURED_SHELL_FUNCTION_NAME, _PUBLIC_SHELL_FUNCTION_NAME):
+        requires_approval, _timeout_seconds = await evaluate_tool_approval(
+            config,
+            runtime_paths,
+            tool_name,
+            arguments,
+            target.agent_name,
+        )
+        if requires_approval:
+            return "Workspace automation shell checks cannot run when shell tool approval is required."
     return None
 
 

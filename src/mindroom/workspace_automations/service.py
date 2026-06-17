@@ -403,6 +403,7 @@ class WorkspaceAutomationService:
         check_result = await self.check_runner(
             config=context.config,
             runtime_paths=context.runtime_paths,
+            hook_registry=context.hook_registry,
             target=entry.target,
             automation=automation,
         )
