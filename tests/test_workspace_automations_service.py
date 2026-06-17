@@ -22,6 +22,7 @@ from mindroom.workspace_automations.models import (
     LoadedWorkspaceAutomation,
     WorkspaceAutomationAction,
     WorkspaceAutomationCheck,
+    WorkspaceAutomationLoadError,
     WorkspaceAutomationLoadResult,
     WorkspaceAutomationTrigger,
 )
@@ -248,6 +249,86 @@ async def test_scan_loads_workspace_files_off_event_loop(
 
     assert scan_thread_ids
     assert all(thread_id != event_loop_thread_id for thread_id in scan_thread_ids)
+
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_start_keeps_same_agent_and_automation_id_separate_by_workspace_root(
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """Concrete workspace roots should be part of the loaded automation identity."""
+    config = _config(runtime_paths)
+    workspace_a = tmp_path / "private_instances" / "alice" / "ops" / "workspace"
+    workspace_b = tmp_path / "private_instances" / "bob" / "ops" / "workspace"
+    automations_by_root = {
+        workspace_a: _automation(workspace_a),
+        workspace_b: _automation(workspace_b),
+    }
+    task_recorder = _TaskRecorder()
+    loader_calls: list[Path] = []
+    clock = _ControlledClock(datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC))
+
+    def target_loader(_config: Config, _runtime_paths: RuntimePaths) -> list[WorkspaceAutomationTarget]:
+        return [_target(workspace_a), _target(workspace_b)]
+
+    def automation_loader(**kwargs: object) -> WorkspaceAutomationLoadResult:
+        workspace_root = cast("Path", kwargs["workspace_root"])
+        loader_calls.append(workspace_root)
+        return WorkspaceAutomationLoadResult(automations=(automations_by_root[workspace_root],))
+
+    service = WorkspaceAutomationService(
+        target_loader=target_loader,
+        automation_loader=automation_loader,
+        now=clock.current_time,
+        sleep=clock.sleep,
+        task_factory=task_recorder,
+        scan_interval_seconds=None,
+    )
+
+    result = await service.start(config, runtime_paths, HookRegistry.empty(), _bot_provider, object())
+
+    loaded = service.list_loaded()
+    assert result.loaded_count == 2
+    assert {(item.agent_name, item.automation_id, item.workspace_root) for item in loaded} == {
+        ("ops", "urgent_email_poll", str(workspace_a)),
+        ("ops", "urgent_email_poll", str(workspace_b)),
+    }
+    assert loader_calls == [workspace_a, workspace_b]
+    assert len(task_recorder.tasks) == 2
+
+    await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_scan_result_load_errors_preserve_private_workspace_root(
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """Private workspace load errors should retain the concrete workspace file path."""
+    config = _config(runtime_paths)
+    private_workspace_root = tmp_path / "private_instances" / "alice" / "ops" / "workspace"
+    load_error = WorkspaceAutomationLoadError(
+        file_path=private_workspace_root / ".mindroom" / "automations.yaml",
+        automation_id="urgent_email_poll",
+        field_path=("automations", "urgent_email_poll", "schedule"),
+        message="schedule must be a valid cron expression",
+    )
+
+    service = WorkspaceAutomationService(
+        target_loader=lambda _config, _runtime_paths: [_target(private_workspace_root)],
+        automation_loader=lambda **_kwargs: WorkspaceAutomationLoadResult(errors=(load_error,)),
+        scan_interval_seconds=None,
+    )
+
+    result = await service.start(config, runtime_paths, HookRegistry.empty(), _bot_provider, object())
+
+    assert result.loaded_count == 0
+    assert result.error_count == 1
+    assert result.errors == (load_error,)
+    assert str(private_workspace_root) in str(result.errors[0].file_path)
+    assert service.list_loaded() == ()
 
     await service.shutdown()
 

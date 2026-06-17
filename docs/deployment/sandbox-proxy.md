@@ -579,16 +579,19 @@ With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, w
 ## Workspace automation shell checks
 
 [Workspace automations](../workspace-automations.md) run their scheduler and service loop in the primary MindRoom runtime.
+There is one central scheduler, not one platform-native scheduler per automation.
+Worker runtimes execute shell checks on demand when the central scheduler reaches a due time.
 Their `check.type: shell` checks use the same worker-routed `shell` tool path as normal shell calls.
 The primary runtime resolves the agent runtime, builds the same shell toolkit route, and sends the check to the configured worker backend when shell is worker-routed.
 The shell command runs from the owning agent workspace and receives the same workspace home contract, worker env filtering, and credential lease behavior as other shell tool calls.
 
-Dedicated Docker and Kubernetes workers are demand-driven for workspace automations.
+Dedicated workers are demand-driven for workspace automations.
 If a worker has scaled down or been cleaned up between cron runs, the next due automation run re-ensures or recreates that worker before executing the check.
 Agent workspace data and worker caches follow the same persistence rules described above for the selected backend.
-MindRoom does not create Kubernetes CronJobs for workspace automations.
-MindRoom also does not keep worker pods alive just because an automation exists.
-Kubernetes ephemeral workers can therefore scale to zero between runs and come back on the next due run.
+MindRoom does not create platform-native cron resources for workspace automations.
+MindRoom also does not keep dedicated workers alive just because an automation exists.
+On Kubernetes, this means MindRoom does not create CronJobs or keep-alive worker pods for workspace automations.
+Dedicated workers can therefore scale to zero between runs and come back on the next due run.
 
 The automation scheduler itself remains in the primary runtime, so primary runtime uptime controls whether cron checks are evaluated.
 Automation state is written under `mindroom_data/workspace_automations/state.json`.

@@ -24,9 +24,10 @@ Automation runtime status is stored separately under `mindroom_data/workspace_au
 
 Workspace automations are disabled by default.
 Enable them with `workspace_automations` in `defaults` or on an individual agent.
-The first version supports shared agent workspaces only.
-Private agents are skipped because requester-private automation identity is not supported yet.
-Shared agents that use `worker_scope: user` or `worker_scope: user_agent` are also skipped because unattended automation checks have no live requester identity.
+Shared agent workspaces are eligible when policy is enabled and the agent has a resolved workspace.
+Private agent workspaces are eligible after a real requester interaction has materialized that private workspace and MindRoom has recorded the concrete workspace instance.
+MindRoom does not proactively create private workspaces for every possible requester just because automations are enabled.
+Shared agents that use requester-scoped `worker_scope: user` or `worker_scope: user_agent` are still skipped because they have no requester-owned workspace instance for unattended automation checks.
 
 ```yaml
 defaults:
@@ -115,9 +116,12 @@ The management tool validates, lists, and reloads automation definitions, but it
 ## Deployment Behavior
 
 The workspace automation scheduler runs inside the primary MindRoom runtime.
+There is one central scheduler, not one platform-native scheduler per automation.
+Worker runtimes execute shell checks on demand when the central scheduler reaches a due time.
 Shell checks use the same worker-routed `shell` tool path as ordinary shell calls.
 This means worker backend, worker scope, workspace home, environment filtering, and credential lease behavior come from the normal shell tool deployment.
-Docker and Kubernetes dedicated workers may scale down between automation runs.
+Dedicated worker backends may scale down between automation runs.
 MindRoom re-ensures or recreates the worker on the next due run before executing the shell check.
-MindRoom does not create Kubernetes CronJobs or keep-alive pods for workspace automations.
+MindRoom does not create platform-native cron resources or keep dedicated workers alive just because an automation exists.
+On Kubernetes, this means MindRoom does not create CronJobs or keep-alive worker pods for workspace automations.
 See [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/#workspace-automation-shell-checks) for deployment details.
