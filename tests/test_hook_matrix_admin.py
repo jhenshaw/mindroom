@@ -11,14 +11,27 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
+from mindroom.bot import AgentBot
+from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.hooks import HookContext, HookContextSupport
 from mindroom.hooks.registry import HookRegistry, HookRegistryState
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import AgentMessageSnapshot
+from mindroom.matrix.invited_rooms_store import invited_rooms_path, load_invited_rooms
+from mindroom.matrix.state import MatrixState
+from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
-from tests.conftest import bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    orchestrator_runtime_paths,
+    runtime_paths_for,
+    test_runtime_paths,
+)
+from tests.identity_helpers import entity_ids, persist_entity_accounts
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -36,6 +49,32 @@ def _matrix_admin_module() -> object:
     spec = importlib.util.find_spec("mindroom.hooks.matrix_admin")
     assert spec is not None, "mindroom.hooks.matrix_admin should exist"
     return importlib.import_module("mindroom.hooks.matrix_admin")
+
+
+def _private_room_config(tmp_path: Path) -> Config:
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"general": AgentConfig(display_name="General", rooms=[])},
+            models={"default": ModelConfig(provider="test", id="test-model")},
+        ),
+        runtime_paths,
+    )
+    persist_entity_accounts(
+        config,
+        runtime_paths_for(config),
+        usernames={ROUTER_AGENT_NAME: "mindroom_router", "general": "mindroom_general"},
+    )
+    return config
+
+
+def _router_user(user_id: str) -> AgentMatrixUser:
+    return AgentMatrixUser(
+        agent_name=ROUTER_AGENT_NAME,
+        user_id=user_id,
+        display_name="Router",
+        password=TEST_PASSWORD,
+    )
 
 
 def test_hooks_package_reexports_hook_matrix_admin_api() -> None:
@@ -179,6 +218,112 @@ async def test_build_hook_matrix_admin_delegates_existing_room_helpers(tmp_path:
     mock_add.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_hook_matrix_admin_invite_user_with_config_delegates_to_raw_invite(tmp_path: Path) -> None:
+    """Single-user invite should not run managed private-room reconciliation."""
+    module = _matrix_admin_module()
+    config = _private_room_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.homeserver = "http://localhost:8008"
+
+    with patch("mindroom.hooks.matrix_admin.invite_to_room", new=AsyncMock(return_value=False)) as mock_invite:
+        admin = module.build_hook_matrix_admin(client, runtime_paths=runtime_paths, config=config)
+        invited = await admin.invite_user("!created:localhost", "@user:localhost")
+
+    assert invited is False
+    client.joined_members.assert_not_awaited()
+    mock_invite.assert_awaited_once_with(client, "!created:localhost", "@user:localhost")
+    assert load_invited_rooms(invited_rooms_path(runtime_paths.storage_root, ROUTER_AGENT_NAME)) == set()
+    assert load_invited_rooms(invited_rooms_path(runtime_paths.storage_root, "general")) == set()
+
+
+@pytest.mark.asyncio
+async def test_hook_matrix_admin_create_room_persists_room_for_managed_creator(tmp_path: Path) -> None:
+    """A managed bot's created room is recorded so lifecycle cleanup preserves it for the creator."""
+    module = _matrix_admin_module()
+    config = _private_room_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    ids = entity_ids(config, runtime_paths)
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.homeserver = "http://localhost:8008"
+    client.user_id = ids[ROUTER_AGENT_NAME].full_id
+
+    with patch("mindroom.hooks.matrix_admin.create_room", new=AsyncMock(return_value="!private:localhost")):
+        admin = module.build_hook_matrix_admin(client, runtime_paths=runtime_paths, config=config)
+        room_id = await admin.create_room(name="Private Room", alias_localpart="private-user")
+
+    assert room_id == "!private:localhost"
+    assert "!private:localhost" in load_invited_rooms(
+        invited_rooms_path(runtime_paths.storage_root, ROUTER_AGENT_NAME),
+    )
+    # Only the creator records the room; invited bots rely on the invite-accept lifecycle instead.
+    assert load_invited_rooms(invited_rooms_path(runtime_paths.storage_root, "general")) == set()
+
+
+@pytest.mark.asyncio
+async def test_hook_matrix_admin_create_room_does_not_persist_for_unmanaged_creator(tmp_path: Path) -> None:
+    """A non-managed creator records nothing, even when config is present."""
+    module = _matrix_admin_module()
+    config = _private_room_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.homeserver = "http://localhost:8008"
+    client.user_id = "@stranger:localhost"
+
+    with patch("mindroom.hooks.matrix_admin.create_room", new=AsyncMock(return_value="!private:localhost")):
+        admin = module.build_hook_matrix_admin(client, runtime_paths=runtime_paths, config=config)
+        room_id = await admin.create_room(name="Private Room", alias_localpart="private-user")
+
+    assert room_id == "!private:localhost"
+    assert load_invited_rooms(invited_rooms_path(runtime_paths.storage_root, ROUTER_AGENT_NAME)) == set()
+    assert load_invited_rooms(invited_rooms_path(runtime_paths.storage_root, "general")) == set()
+
+
+@pytest.mark.asyncio
+async def test_hook_matrix_admin_created_room_survives_lifecycle_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A room the router creates must survive its own lifecycle cleanup."""
+    module = _matrix_admin_module()
+    config = _private_room_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    ids = entity_ids(config, runtime_paths)
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.homeserver = "http://localhost:8008"
+    client.user_id = ids[ROUTER_AGENT_NAME].full_id
+
+    with patch("mindroom.hooks.matrix_admin.create_room", new=AsyncMock(return_value="!private:localhost")):
+        admin = module.build_hook_matrix_admin(client, runtime_paths=runtime_paths, config=config)
+        await admin.create_room(name="Private Room", alias_localpart="private-user")
+
+    bot = AgentBot(
+        agent_user=_router_user(ids[ROUTER_AGENT_NAME].full_id),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths,
+        rooms=[],
+    )
+    bot.client = AsyncMock()
+    left_room_ids: list[str] = []
+
+    async def mock_leave_non_dm_rooms(_client: AsyncMock, room_ids: list[str]) -> None:
+        left_room_ids.extend(room_ids)
+
+    monkeypatch.setattr(
+        "mindroom.bot_room_lifecycle.get_joined_rooms",
+        AsyncMock(return_value=["!private:localhost", "!old:localhost"]),
+    )
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.leave_non_dm_rooms", mock_leave_non_dm_rooms)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.matrix_state_for_runtime", lambda *_args, **_kwargs: MatrixState())
+
+    await bot.leave_unconfigured_rooms()
+
+    assert bot._room_lifecycle.invited_rooms == {"!private:localhost"}
+    assert left_room_ids == ["!old:localhost"]
+
+
 def test_hook_context_support_prefers_orchestrator_router_matrix_admin(tmp_path: Path) -> None:
     """Router hook support should reuse the orchestrator router admin surface when available."""
     config = _config(tmp_path)
@@ -233,7 +378,7 @@ def test_hook_context_support_builds_router_matrix_admin_without_orchestrator(tm
         admin = support.matrix_admin()
 
     assert admin is sentinel
-    mock_build.assert_called_once_with(runtime.client, runtime_paths_for(config))
+    mock_build.assert_called_once_with(runtime.client, runtime_paths_for(config), config=config)
 
 
 def test_hook_context_support_falls_back_to_orchestrator_router_matrix_admin(tmp_path: Path) -> None:
